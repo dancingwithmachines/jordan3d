@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Jordan3D — depth parallax</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <canvas id="stage"></canvas>
+
+  <!-- Shown until a colour image is loaded -->
+  <div id="dropzone" class="panel center">
+    <h1>Jordan3D</h1>
+    <p>Drop an image anywhere on this page, or put files in <code>assets/</code>
+       and set the paths in <code>js/config.js</code>.</p>
+    <p class="dim">A file whose name contains <code>depth</code> is loaded as the
+       depth map. Any other image is the colour plate.</p>
+  </div>
+
+  <div id="hud" class="dim">press <b>d</b> for controls</div>
+
+  <!-- Tuning panel. Toggled with 'd'. -->
+  <div id="debug" class="panel" hidden>
+    <div class="row title"><span>Controls</span><button id="close">esc</button></div>
+    <div id="sliders"></div>
+    <div class="row">
+      <label>motion</label>
+      <select id="motionMode">
+        <option value="pointer">pointer</option>
+        <option value="auto">auto drift</option>
+        <option value="both">both</option>
+        <option value="gyro">gyro</option>
+      </select>
+    </div>
+    <div class="row buttons">
+      <button id="reset">reset</button>
+      <button id="copy">copy config</button>
+      <button id="grab">save png</button>
+    </div>
+    <pre id="readout"></pre>
+  </div>
+
+  <div id="toast" hidden></div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

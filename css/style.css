@@ -1,0 +1,137 @@
+:root {
+  --bg: #0a0a0a;
+  --fg: #f5f5f5;
+  --dim: #8a8a8a;
+  --line: #2a2a2a;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.5 var(--mono);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The stage is sized to the plate's aspect ratio in JS, so it never letterboxes
+   and never distorts. If it is taller than the window the page just scrolls. */
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+}
+
+#stage {
+  display: block;
+  flex: none;
+  touch-action: none;   /* let us own pointer moves on touch */
+  cursor: crosshair;
+}
+
+.panel {
+  position: fixed;
+  background: rgba(14, 14, 14, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 14px 16px;
+  backdrop-filter: blur(12px);
+}
+
+.center {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: 460px;
+  text-align: center;
+}
+
+.center h1 { margin: 0 0 10px; font-size: 15px; letter-spacing: 0.14em; text-transform: uppercase; }
+.center p { margin: 8px 0; }
+
+code { color: #d8b46a; }
+.dim { color: var(--dim); }
+
+#hud {
+  position: fixed;
+  bottom: 14px;
+  left: 16px;
+  pointer-events: none;
+  mix-blend-mode: difference;
+}
+
+#debug {
+  top: 14px;
+  right: 14px;
+  width: 300px;
+  max-height: calc(100vh - 28px);
+  overflow-y: auto;
+}
+
+#debug .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 7px 0;
+}
+
+#debug .title {
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+  margin-bottom: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+#debug label { width: 82px; flex: none; color: var(--dim); }
+#debug input[type=range] { flex: 1; min-width: 0; accent-color: #d8b46a; }
+#debug output { width: 46px; flex: none; text-align: right; font-variant-numeric: tabular-nums; }
+
+button, select {
+  font: inherit;
+  color: var(--fg);
+  background: #1c1c1c;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+
+button:hover { background: #262626; }
+.buttons { margin-top: 12px; }
+.buttons button { flex: 1; }
+
+#readout {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+#toast {
+  position: fixed;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1c1c1c;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 7px 14px;
+}
+
+body.dragging::after {
+  content: "";
+  position: fixed;
+  inset: 8px;
+  border: 1px dashed #d8b46a;
+  border-radius: 6px;
+  pointer-events: none;
+}
