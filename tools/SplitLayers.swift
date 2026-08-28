@@ -27,11 +27,12 @@ func fail(_ msg: String) -> Never {
 // ------------------------------------------------------------------- options
 
 var input = "", bgOut = "", spriteOut = "", maskOut = "", depthOut = ""
-var depthIn = "", bgDepthOut = ""
+var depthIn = "", bgDepthOut = "", provOut = ""
 var subjThresh: Float = 0.45   // model depth below this, inside the mask, is
                                // treated as a hole and filled from neighbours
 var depthSmooth: Float = 4     // px blur on the subject depth field
 var bgDepthSmooth: Float = 10  // px blur on the background depth field
+var fillSmooth = 2             // box-blur passes over filled pixels only
 var base: Float = 0.86     // the subject's overall depth
 var bulge: Float = 0.12    // how much rounder the core reads than the edges
 var tilt: Float = 0.14     // linear spread across the subject
@@ -57,12 +58,14 @@ while let flag = args.first {
   case "--bg":      bgOut = value()
   case "--sprite":  spriteOut = value()
   case "--mask":    maskOut = value()
+  case "--provenance": provOut = value()   // debug: R=instance G=hero-fill B=patch
   case "--depth":   depthOut = value()
   case "--depth-in":  depthIn = value()     // real depth from the monocular model
   case "--bg-depth":  bgDepthOut = value()
   case "--subj-thresh": subjThresh = Float(value()) ?? subjThresh
   case "--depth-smooth":    depthSmooth = Float(value()) ?? depthSmooth
   case "--bg-depth-smooth": bgDepthSmooth = Float(value()) ?? bgDepthSmooth
+  case "--fill-smooth":     fillSmooth = Int(value()) ?? fillSmooth
   case "--base":    base = Float(value()) ?? base
   case "--bulge":   bulge = Float(value()) ?? bulge
   case "--tilt":    tilt = Float(value()) ?? tilt
@@ -164,9 +167,27 @@ let maskImage = CIImage(cvPixelBuffer: maskBuffer).transformed(by: CGAffineTrans
   scaleX: CGFloat(W) / CGFloat(CVPixelBufferGetWidth(maskBuffer)),
   y: CGFloat(H) / CGFloat(CVPixelBufferGetHeight(maskBuffer))))
 
+// Loaded before the mask is assembled: real depth is the best available check
+// on whether a pixel we are about to *add* to the subject really belongs to it.
+var predicted: [UInt8] = []
+if !depthIn.isEmpty {
+  guard let dSrc = CGImageSourceCreateWithURL(URL(fileURLWithPath: depthIn) as CFURL, nil),
+        let dCG = CGImageSourceCreateImageAtIndex(dSrc, 0, nil) else {
+    fail("could not read \(depthIn)")
+  }
+  predicted = greyBytes(CIImage(cgImage: dCG).transformed(by: CGAffineTransform(
+    scaleX: CGFloat(W) / CGFloat(dCG.width), y: CGFloat(H) / CGFloat(dCG.height))))
+}
+
 let instanceRaw = greyBytes(maskImage)
 var subject = [UInt8](repeating: 0, count: W * H)
-for i in 0..<(W * H) { subject[i] = instanceRaw[i] >= 128 ? 255 : 0 }
+var fromInstance = [UInt8](repeating: 0, count: W * H)
+var fromHeroFill = [UInt8](repeating: 0, count: W * H)
+var fromPatch = [UInt8](repeating: 0, count: W * H)
+for i in 0..<(W * H) {
+  subject[i] = instanceRaw[i] >= 128 ? 255 : 0
+  fromInstance[i] = subject[i]
+}
 
 // Thin extremities Vision drops, accepted only near the existing mask.
 if heroFill > 0, let pObs = persons.results?.first {
@@ -174,8 +195,21 @@ if heroFill > 0, let pObs = persons.results?.first {
   let personRaw = greyBytes(pci.transformed(by: CGAffineTransform(
     scaleX: CGFloat(W) / pci.extent.width, y: CGFloat(H) / pci.extent.height)))
   let nearHero = greyBytes(blurred(maskImage, heroFill / 1.5))
+  // Person segmentation lights up the crowd as well as the hero, and near his
+  // legs and feet there are spectators close enough to the mask to qualify. On
+  // this frame that pulled in a patch of crowd that then travelled with his
+  // sneaker. Real depth settles it: a genuine part of him reads at subject
+  // depth, a spectator behind him does not.
+  var vetoed = 0
   for i in 0..<(W * H) where subject[i] < 128 {
-    if nearHero[i] >= 13 && Float(personRaw[i]) / 255.0 >= heroThresh { subject[i] = 255 }
+    guard nearHero[i] >= 13 && Float(personRaw[i]) / 255.0 >= heroThresh else { continue }
+    if !predicted.isEmpty && Float(predicted[i]) / 255.0 < subjThresh { vetoed += 1; continue }
+    subject[i] = 255; fromHeroFill[i] = 255
+  }
+  if vetoed > 0 {
+    FileHandle.standardError.write(
+      String(format: "hero-fill: %.2f%% of frame vetoed by depth\n",
+             Double(vetoed) / Double(W * H) * 100).data(using: .utf8)!)
   }
 }
 
@@ -183,6 +217,7 @@ if heroFill > 0, let pObs = persons.results?.first {
 if !patches.isEmpty {
   let photo = rgbaBytes(cgImage)
   for patch in patches {
+    var inPatch = [Bool](repeating: false, count: W * H)
     let cx = patch.cx * Float(W), cy = patch.cy * Float(H)
     let rx = max(patch.rx * Float(W), 1), ry = max(patch.ry * Float(H), 1)
     for y in max(0, Int(cy - ry))...min(H - 1, Int(cy + ry)) {
@@ -190,11 +225,36 @@ if !patches.isEmpty {
         let nx = (Float(x) - cx) / rx, ny = (Float(y) - cy) / ry
         if nx * nx + ny * ny > 1 { continue }
         let i = y * W + x
+        inPatch[i] = true
         if subject[i] > 127 { continue }
         let r = Int(photo[i*4]), g = Int(photo[i*4+1]), b = Int(photo[i*4+2])
-        let isSkin = r > 80 && r >= g && g >= b && (r - b) > 18
-        if !patch.skin || isSkin { subject[i] = 255 }
+        let isSkin = r > 80 && r >= g && g >= b && (r - b) > 14
+        if !patch.skin || isSkin { subject[i] = 255; fromPatch[i] = 255 }
       }
+    }
+
+    // Close interior holes only. A gated patch skips a lit highlight on the
+    // digit because the specular reads as washed out, leaving pinholes; taking
+    // any pixel whose neighbours are nearly all inside fills those without
+    // growing the region outward into the crowd, which is what an ungated
+    // ellipse did — it travelled with the hand as a hard-edged blob.
+    for _ in 0..<3 {
+      var add: [Int] = []
+      for y in 1..<(H - 1) {
+        for x in 1..<(W - 1) {
+          let i = y * W + x
+          guard inPatch[i] && subject[i] < 128 else { continue }
+          var n = 0
+          for dy in -1...1 {
+            for dx in -1...1 where !(dx == 0 && dy == 0) {
+              if subject[(y + dy) * W + (x + dx)] > 127 { n += 1 }
+            }
+          }
+          if n >= 6 { add.append(i) }
+        }
+      }
+      if add.isEmpty { break }
+      for i in add { subject[i] = 255; fromPatch[i] = 255 }
     }
   }
 }
@@ -376,6 +436,34 @@ func pyramidFill(colour: [Float], weight: [Float]) -> [Float] {
   return levels[0].colour
 }
 
+/// Softens filled pixels only, leaving real photography untouched.
+///
+/// The nearest-known-pixel field comes from a two-sweep approximation, so
+/// neighbouring hole pixels can reflect through different boundary points and
+/// copy from unrelated places. Magnified, that reads as a blocky staircase in
+/// the revealed band. A couple of box-blur passes restricted to the filled
+/// region knock the steps down while keeping enough grain to pass as crowd.
+func smoothFilled(_ colour: inout [Float], filledMask: [Bool], passes: Int) {
+  guard passes > 0 else { return }
+  for _ in 0..<passes {
+    var next = colour
+    for y in 1..<(H - 1) {
+      for x in 1..<(W - 1) {
+        let i = y * W + x
+        guard filledMask[i] else { continue }
+        for k in 0..<3 {
+          var sum: Float = 0
+          for dy in -1...1 {
+            for dx in -1...1 { sum += colour[((y + dy) * W + (x + dx)) * 3 + k] }
+          }
+          next[i*3+k] = sum / 9
+        }
+      }
+    }
+    colour = next
+  }
+}
+
 // ------------------------------------------------------------------- outputs
 
 let photo = rgbaBytes(cgImage)
@@ -393,11 +481,13 @@ for i in 0..<(W * H) {
 }
 let unknownPct = Double(bgWeight.reduce(0) { $0 + ($1 < 1 ? 1 : 0) }) / Double(W * H) * 100
 FileHandle.standardError.write(String(format: "filling %.1f%% of the plate\n", unknownPct).data(using: .utf8)!)
+let wasFilled = bgWeight.map { $0 < 1 }
 mirrorFill(colour: &bgColour, weight: &bgWeight, photo: photo, maxDist: extend)
 let stillUnknown = Double(bgWeight.reduce(0) { $0 + ($1 < 1 ? 1 : 0) }) / Double(W * H) * 100
 FileHandle.standardError.write(String(format: "%.1f%% left for the pyramid (never revealed)\n",
                                       stillUnknown).data(using: .utf8)!)
-let bgFilled = pyramidFill(colour: bgColour, weight: bgWeight)
+var bgFilled = pyramidFill(colour: bgColour, weight: bgWeight)
+smoothFilled(&bgFilled, filledMask: wasFilled, passes: fillSmooth)
 
 // Sprite alpha: erode a touch so crowd pixels caught by the mask edge do not
 // ride along, then feather.
@@ -468,13 +558,6 @@ writeRGBA(spriteBytes, to: spriteOut)
 //
 // Both use the fills already built for colour.
 if !depthIn.isEmpty {
-  guard let dSrc = CGImageSourceCreateWithURL(URL(fileURLWithPath: depthIn) as CFURL, nil),
-        let dCG = CGImageSourceCreateImageAtIndex(dSrc, 0, nil) else {
-    fail("could not read \(depthIn)")
-  }
-  let predicted = greyBytes(CIImage(cgImage: dCG).transformed(by: CGAffineTransform(
-    scaleX: CGFloat(W) / CGFloat(dCG.width), y: CGFloat(H) / CGFloat(dCG.height))))
-
   // the fill helpers work on rgb, so carry depth in all three channels
   /// `requireForeground` additionally rejects model depth that reads as
   /// background *inside* the subject mask. The model loses thin, low-contrast
@@ -599,6 +682,22 @@ if !maskOut.isEmpty {
   var m = [UInt8](repeating: 0, count: W * H * 4)
   for i in 0..<(W * H) { for k in 0..<3 { m[i*4+k] = alphaSoft[i] }; m[i*4+3] = 255 }
   writeRGBA(m, to: maskOut)
+}
+
+if !provOut.isEmpty {
+  var m = [UInt8](repeating: 0, count: W * H * 4)
+  var counts = [0, 0, 0]
+  for i in 0..<(W * H) {
+    m[i*4] = fromInstance[i]; m[i*4+1] = fromHeroFill[i]; m[i*4+2] = fromPatch[i]
+    m[i*4+3] = 255
+    if fromInstance[i] > 0 { counts[0] += 1 }
+    if fromHeroFill[i] > 0 { counts[1] += 1 }
+    if fromPatch[i] > 0 { counts[2] += 1 }
+  }
+  writeRGBA(m, to: provOut)
+  let pc = counts.map { String(format: "%.2f%%", Double($0) / Double(W * H) * 100) }
+  FileHandle.standardError.write(
+    "provenance — instance \(pc[0]), hero-fill \(pc[1]), patch \(pc[2])\n".data(using: .utf8)!)
 }
 
 print("wrote \(bgOut) and \(spriteOut)" + (maskOut.isEmpty ? "" : " and \(maskOut)"))
