@@ -179,6 +179,61 @@ Silhouettes were then checked at 4–5x magnification at both extremes of travel
 (`J3D.inspect`) — the defender translates rigidly, arm attached to shoulder,
 and Jordan's outstretched hand and wristband hold together.
 
+## Layered mode (the default)
+
+`mode: 'layers'` composites two textures instead of marching one plate:
+
+    ./tools/split_layers.sh --in assets/Jordan_Dunk.jpg \
+      --bg assets/bg.jpg --sprite assets/subject.png \
+      --patch 0.3575,0.5690,0.0104,0.0220,0 \
+      --patch 0.3450,0.5994,0.0100,0.0113
+
+- **`assets/bg.jpg`** — the photo with the subject's silhouette filled in.
+- **`assets/subject.png`** — the subject, cut out, with alpha.
+
+This removes both hard limits of the single-plate path at once:
+
+| problem | single plate | layers |
+|---|---|---|
+| thin feature travel | clamped to its own width | full, always |
+| behind the subject | invented per frame, streaks | real, filled once |
+
+Measured on this frame, every point on the subject — thumb tip, index tip,
+palm, forearm, nose, torso — travels an identical **−68 px** across a full view
+sweep, against −68 predicted, while the crowd goes +40 the other way. The
+fingertips keep up with the palm because they are the same texture moving as
+one piece: there is no per-pixel search to lose them.
+
+### How the fill works
+
+Two stages, and the split matters. Only a band about
+`depthScale x (subject - background)` wide just inside the silhouette is ever
+revealed — roughly 37 px here. So:
+
+1. **Mirror fill** out to `--extend` (90 px): for each hole pixel, find the
+   nearest real pixel and reflect through it, sampling at `2b - p`. That carries
+   genuine crowd texture *and its film grain* into the band that shows, and the
+   direction follows the silhouette normal. An earlier ring-dilation approach
+   laid down an obvious 45-degree cross-hatch; mirroring has no grid bias.
+2. **Pull-push pyramid** for the remaining ~1.6%: halve the image repeatedly
+   averaging only known pixels, then walk back up filling from coarser levels.
+   Smooth, and deep enough inside that nobody sees it.
+
+The fill being **static** is the point. The single-plate smear is objectionable
+largely because it changes every frame; a fixed, slightly-odd patch of crowd
+reads as crowd.
+
+### What layers give up
+
+The sprite is one flat depth, so there is no parallax *within* the subject — his
+hand no longer sits nearer than his chest. That is the trade for coherence, and
+on balance the right one, since intra-subject depth is exactly what the width
+limit punishes. A gentle depth *inside* the sprite is possible later; keep the
+differential small or the clamp returns.
+
+The rim and net still live in the background layer, so they drift with the
+crowd. A third layer would fix that.
+
 ## Known limitation
 
 A single depth map has no data *behind* anything. On the edge where the camera
