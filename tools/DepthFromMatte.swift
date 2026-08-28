@@ -35,8 +35,12 @@ var input = "", output = "", matteOut = ""
 var near: Float = 0.86         // subject depth
 var bgTop: Float = 0.06        // background at the top of the frame
 var bgBottom: Float = 0.42     // background at the bottom
-var relief: Float = 0.12       // how much the subject rounds off toward its edge
-var feather: Float = 5.0       // matte edge softening, in pixels
+var relief: Float = 0          // subject edge rounding; 0 keeps fine detail crisp
+var feather: Float = 2.0       // matte edge softening, in pixels
+var heroFill: Float = 70       // px reach for recovering thin bits Vision missed
+var heroThresh: Float = 0.55   // person-mask value that counts as the hero
+var tilt: Float = 0            // depth spread across the subject; 0 = flat cutout
+var tiltDeg: Float = 135       // direction that gets *nearer*; y counts downward
 var mid: Float = 0.55          // depth for secondary figures
 var midLo: Float = 0.25        // person-mask value where a secondary figure starts
 var midHi: Float = 0.60        // ...and where it counts fully. Below midLo = crowd.
@@ -58,6 +62,10 @@ while let flag = args.first {
   case "--bg-top":   bgTop = Float(value()) ?? bgTop
   case "--bg-bottom": bgBottom = Float(value()) ?? bgBottom
   case "--relief":   relief = Float(value()) ?? relief
+  case "--hero-fill":   heroFill = Float(value()) ?? heroFill
+  case "--hero-thresh": heroThresh = Float(value()) ?? heroThresh
+  case "--tilt":     tilt = Float(value()) ?? tilt
+  case "--tilt-deg": tiltDeg = Float(value()) ?? tiltDeg
   case "--feather":  feather = Float(value()) ?? feather
   case "--mid":      mid = Float(value()) ?? mid
   case "--mid-lo":   midLo = Float(value()) ?? midLo
@@ -87,7 +95,7 @@ persons.qualityLevel = .accurate
 persons.outputPixelFormat = kCVPixelFormatType_OneComponent8
 
 do {
-  try handler.perform(usePersons ? [request, persons] : [request])
+  try handler.perform(usePersons || heroFill > 0 ? [request, persons] : [request])
 } catch { fail("Vision failed: \(error)") }
 
 guard let observation = request.results?.first, !observation.allInstances.isEmpty else {
@@ -123,6 +131,17 @@ func greyBytes(_ image: CIImage) -> [UInt8] {
   return bytes
 }
 
+/// Wraps an 8-bit grey buffer back up as a CIImage so it can be blurred.
+func ciFromGrey(_ bytes: [UInt8]) -> CIImage {
+  guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+        let cg = CGImage(width: W, height: H, bitsPerComponent: 8, bitsPerPixel: 8,
+                         bytesPerRow: W, space: grey,
+                         bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                         provider: provider, decode: nil, shouldInterpolate: false,
+                         intent: .defaultIntent) else { fail("could not wrap mask") }
+  return CIImage(cgImage: cg)
+}
+
 let maskImage = CIImage(cvPixelBuffer: maskBuffer)
   .transformed(by: CGAffineTransform(
     scaleX: CGFloat(W) / CGFloat(CVPixelBufferGetWidth(maskBuffer)),
@@ -138,10 +157,44 @@ func blurred(_ image: CIImage, _ radius: Float) -> CIImage {
   return out.cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
 }
 
-let matte = greyBytes(blurred(maskImage, feather))
+// The instance matte loses thin, low-contrast extremities: on the Jordan frame
+// it drops his outstretched fingers entirely, which then sit at background
+// depth and parallax *against* the arm they belong to.
+//
+// Person segmentation does resolve them, but it also lights up the crowd and
+// the other player, so it cannot simply be unioned in. Instead it is accepted
+// only within `heroFill` px of the instance matte: a gap adjacent to the hero
+// gets filled, while a second figure a few hundred px away never qualifies.
+let instanceRaw = greyBytes(maskImage)
+var heroUnion = [UInt8](repeating: 0, count: W * H)
+
+if heroFill > 0, let pObs = persons.results?.first {
+  let pci = CIImage(cvPixelBuffer: pObs.pixelBuffer)
+  let personRaw = greyBytes(pci.transformed(by: CGAffineTransform(
+    scaleX: CGFloat(W) / pci.extent.width, y: CGFloat(H) / pci.extent.height)))
+
+  // Blurring the matte and taking anything non-trivial approximates "within
+  // heroFill px of the hero".
+  let nearHero = greyBytes(blurred(maskImage, heroFill / 1.5))
+  var recovered = 0
+  for i in 0..<(W * H) {
+    let isHero = instanceRaw[i] >= 128
+    let adjacent = nearHero[i] >= 13 && Float(personRaw[i]) / 255.0 >= heroThresh
+    heroUnion[i] = (isHero || adjacent) ? 255 : 0
+    if !isHero && adjacent { recovered += 1 }
+  }
+  FileHandle.standardError.write(
+    String(format: "hero fill recovered %.2f%% of frame\n",
+           Double(recovered) / Double(W * H) * 100).data(using: .utf8)!)
+} else {
+  for i in 0..<(W * H) { heroUnion[i] = instanceRaw[i] >= 128 ? 255 : 0 }
+}
+
+let heroImage = ciFromGrey(heroUnion)
+let matte = greyBytes(blurred(heroImage, feather))
 // Stand-in for a distance transform: blur wide enough that only the interior
-// stays saturated.
-let mound = greyBytes(blurred(maskImage, Float(max(W, H)) / 40.0))
+// stays saturated. Only consulted when relief > 0.
+let mound = greyBytes(blurred(heroImage, Float(max(W, H)) / 40.0))
 
 // Secondary figures — opt-in, and read the caveat below before using it.
 //
@@ -158,7 +211,7 @@ let mound = greyBytes(blurred(maskImage, Float(max(W, H)) / 40.0))
 // stops — mid-torso here. For a figure the mask only half-finds, leaving this
 // off and letting them ride the background ramp reads cleaner.
 var personMask: [UInt8]? = nil
-if let pObs = persons.results?.first {
+if usePersons, let pObs = persons.results?.first {
   let pci = CIImage(cvPixelBuffer: pObs.pixelBuffer)
   let scaled = pci.transformed(by: CGAffineTransform(
     scaleX: CGFloat(W) / pci.extent.width, y: CGFloat(H) / pci.extent.height))
@@ -169,16 +222,35 @@ if let pObs = persons.results?.first {
   var solid = [UInt8](repeating: 0, count: W * H)
   for i in 0..<(W * H) { solid[i] = Float(grown[i]) / 255.0 >= midLo ? 255 : 0 }
 
-  guard let provider = CGDataProvider(data: Data(solid) as CFData),
-        let solidCG = CGImage(width: W, height: H, bitsPerComponent: 8, bitsPerPixel: 8,
-                              bytesPerRow: W, space: grey,
-                              bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
-                              provider: provider, decode: nil, shouldInterpolate: false,
-                              intent: .defaultIntent) else { fail("could not build mask") }
-  personMask = greyBytes(blurred(CIImage(cgImage: solidCG), radius * 0.5))
+  personMask = greyBytes(blurred(ciFromGrey(solid), radius * 0.5))
 }
 
 // ------------------------------------------------------------- compose depth
+
+// A matte carries no depth *within* the subject, so a flat cutout makes every
+// part of a figure travel identically — an outstretched hand moves exactly like
+// the chest behind it and the limb reads as stiff. `tilt` spreads depth linearly
+// across the subject so a chosen direction sits nearer.
+//
+// This is an authored approximation, not measured depth: it says "this end of
+// him is closer", which for a single limb reaching toward the lens is enough to
+// sell the movement. It cannot know that a wrist bends. Off by default.
+var tiltAxis = (x: Float(0), y: Float(0))
+var tiltMin = Float.greatestFiniteMagnitude
+var tiltMax = -Float.greatestFiniteMagnitude
+
+if tilt != 0 {
+  let rad = tiltDeg * Float.pi / 180
+  tiltAxis = (x: cos(rad), y: sin(rad))
+  for y in 0..<H {
+    for x in 0..<W where heroUnion[y * W + x] > 127 {
+      let p = Float(x) * tiltAxis.x + Float(y) * tiltAxis.y
+      tiltMin = min(tiltMin, p)
+      tiltMax = max(tiltMax, p)
+    }
+  }
+}
+let tiltSpan = max(tiltMax - tiltMin, 1)
 
 func smoothstep(_ a: Float, _ b: Float, _ x: Float) -> Float {
   guard b > a else { return x < a ? 0 : 1 }
@@ -197,7 +269,11 @@ for y in 0..<H {
     let i = y * W + x
     let m = Float(matte[i]) / 255.0
     let interior = Float(mound[i]) / 255.0
-    let subject = near - relief * (1.0 - interior)
+    var subject = near - relief * (1.0 - interior)
+    if tilt != 0 {
+      let p = Float(x) * tiltAxis.x + Float(y) * tiltAxis.y
+      subject += tilt * ((p - tiltMin) / tiltSpan - 0.5)
+    }
 
     var d = bg
     if let pm = personMask {
@@ -238,4 +314,6 @@ let secondary = Double(secondaryPixels) / Double(W * H) * 100
 let centroid = subjectPixels > 0 ? Double(sumY) / Double(subjectPixels) / Double(H) : 0
 print(String(format: "%dx%d  subject %.1f%% of frame (centroid %.2f down), secondary figures %.1f%%",
              W, H, coverage, centroid, secondary))
+print(String(format: "near %.2f, tilt %.2f @ %.0f deg, relief %.2f, feather %.1f px",
+             near, tilt, tiltDeg, relief, feather))
 print("wrote \(output)" + (matteOut.isEmpty ? "" : " and \(matteOut)"))

@@ -68,17 +68,33 @@ With no files at all it falls back to a synthetic test scene
 
 ```bash
 ./tools/make_depth.sh --in assets/Jordan_Dunk.jpg --out assets/depth.png \
-  --matte grabs/matte.png --bg-top 0.26 --bg-bottom 0.34
+  --matte grabs/matte.png --bg-top 0.26 --bg-bottom 0.34 \
+  --tilt 0.22 --tilt-deg 135
 ```
 
 This runs entirely on this machine — the image is never uploaded. It uses
 Apple's Vision framework, which gives *mattes*, not depth, so depth is composed
 from two of them:
 
-- **Foreground instance matte** → the hero subject, placed at `--near` (0.86)
-  and rounded slightly toward its silhouette so it does not read as a flat
-  card. A heavily blurred copy of the matte stands in for a distance
-  transform.
+- **Foreground instance matte** → the hero subject, placed at `--near` (0.86).
+  Thin, low-contrast extremities get dropped by this matte, so `--hero-fill`
+  (70 px) accepts person-segmentation pixels *within that radius of the matte*:
+  a gap adjacent to the hero is filled, while a second figure hundreds of px
+  away never qualifies.
+- **`--tilt`** → depth spread linearly across the hero, `--tilt-deg` naming the
+  direction that gets nearer (135° = toward the lower left, y counting down).
+  A matte carries no depth *within* a subject, so a flat cutout makes an
+  outstretched hand travel exactly like the chest behind it and the limb reads
+  as stiff. At 0.22/135° on this frame the hand sits at 0.945 against 0.839 for
+  the torso, so it moves about 30% further. This is authored, not measured — it
+  says "this end of him is closer", which is enough to sell a limb reaching
+  toward the lens, but it cannot know that a wrist bends.
+- **`--relief`** → rounds the subject toward its silhouette using a wide blur
+  as a stand-in for a distance transform. **Defaults to 0**, because it pushes
+  *thin* features backward — an outstretched hand, physically the nearest thing
+  in shot, ends up further away than the chest. It also washed a ~36 px ramp
+  across the silhouette, which smeared detail as fine as a nose or lips. Only
+  useful on a broad, blobby subject.
 - **Everything else** → a vertical ramp from `--bg-top` to `--bg-bottom`. The
   tool defaults (0.06 → 0.42) suit a scene with a floor receding to a back
   wall. **This frame is not one** — it is a telephoto shot of a crowd *wall* at
@@ -151,7 +167,7 @@ prints the current values in `js/config.js` shape, ready to paste over
 | `crop`      | zoom in so displacement never samples past the plate edge.       |
 | `steps`     | ray-march steps. 24 is the default; below ~12 edges quantise.    |
 | `refine`    | binary steps tightening the hit. 4 is plenty, and cheap.          |
-| `smooth`    | depth blur in texels. 0 by default — the generated map is already pre-softened. Raise it for a map from elsewhere with JPEG steps along its edges. |
+| `smooth`    | depth blur in texels. 0 by default — the generated map is crisp on purpose, and blurring it here is what smears fine features like a nose or lips. Raise it only for a map from elsewhere with JPEG steps along its edges. |
 | `dilate`    | biases edges toward the nearer surface. 0 by default; the march handles occlusion properly now, so this is only a rescue for a bad map. |
 | `stageHeight` | stage height in CSS px. Width follows the plate's aspect ratio, so the stage never letterboxes and never distorts. If it is taller than the window, the page scrolls. |
 | `invert`    | set to 1 for dark-near maps.                                     |
