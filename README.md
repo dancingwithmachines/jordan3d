@@ -77,8 +77,11 @@ With no files at all it falls back to a synthetic test scene
   --matte grabs/matte.png --bg-top 0.26 --bg-bottom 0.34 \
   --tilt 0.22 --tilt-deg 135 \
   --patch 0.3575,0.5690,0.0104,0.0220,0 \
-  --patch 0.3450,0.5994,0.0100,0.0113
+  --patch 0.3450,0.5994,0.0100,0.0113 \
+  --patch 0.4657,0.2083,0.1071,0.0982,0
 ```
+
+The third patch is a **cushion** — see below.
 
 This runs entirely on this machine — the image is never uploaded. It uses
 Apple's Vision framework, which gives *mattes*, not depth, so depth is composed
@@ -115,6 +118,25 @@ from two of them:
 
   This is hand retouching, and it is per-image — the coordinates mean nothing
   for a different photograph. A monocular depth model would not need it.
+
+  **Cushions.** The same flag solves a different problem. Dis-occlusion smear
+  always lands on the depth cliff at a subject's silhouette, and against a face
+  that is ruinous: the background streaks horizontally along the profile and
+  bright lip and nose highlights bleed into it, which reads as the nose and
+  mouth distorting even though they are perfectly rigid.
+
+  The smear cannot be removed without inpainting, but it can be *moved*. Draw a
+  geometric patch generously around the head so a margin of background is
+  included at the subject's depth. Everything from the profile out to that
+  boundary now travels together, so there is no cliff at the face — the cliff,
+  and the smear with it, relocates to the patch boundary out in dark,
+  out-of-focus crowd where nothing reads.
+
+  Size the margin wider than the smear itself, or it lands back on the face.
+  Smear width is `depthScale x (subject - background) x |view|` in uv; on this
+  frame that is ~37 px at full deflection, so the head patch uses ~55 px of
+  margin. Pick a boundary that falls in dark or defocused background — this
+  trades a visible artefact for an invisible one, so where it lands matters.
 - **`--relief`** → rounds the subject toward its silhouette using a wide blur
   as a stand-in for a distance transform. **Defaults to 0**, because it pushes
   *thin* features backward — an outstretched hand, physically the nearest thing
