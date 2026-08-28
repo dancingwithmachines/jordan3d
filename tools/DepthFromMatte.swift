@@ -39,6 +39,8 @@ var relief: Float = 0          // subject edge rounding; 0 keeps fine detail cri
 var feather: Float = 2.0       // matte edge softening, in pixels
 var heroFill: Float = 70       // px reach for recovering thin bits Vision missed
 var heroThresh: Float = 0.55   // person-mask value that counts as the hero
+var thinDilate: Float = 0      // px to widen *thin* parts of the hero; see below
+var thinCut: Float = 0.45      // thickness below which a region counts as thin
 var tilt: Float = 0            // depth spread across the subject; 0 = flat cutout
 var tiltDeg: Float = 135       // direction that gets *nearer*; y counts downward
 // Elliptical regions forced into the hero, as cx,cy,rx,ry in fractions of the
@@ -68,6 +70,8 @@ while let flag = args.first {
   case "--relief":   relief = Float(value()) ?? relief
   case "--hero-fill":   heroFill = Float(value()) ?? heroFill
   case "--hero-thresh": heroThresh = Float(value()) ?? heroThresh
+  case "--thin-dilate": thinDilate = Float(value()) ?? thinDilate
+  case "--thin-cut":    thinCut = Float(value()) ?? thinCut
   case "--tilt":     tilt = Float(value()) ?? tilt
   case "--tilt-deg": tiltDeg = Float(value()) ?? tiltDeg
   case "--patch":
@@ -253,6 +257,35 @@ if !patches.isEmpty {
   FileHandle.standardError.write(
     String(format: "patches added %.3f%% of frame\n",
            Double(added) / Double(W * H) * 100).data(using: .utf8)!)
+}
+
+// Widening thin parts of the subject.
+//
+// In this technique a near feature can only displace about as far as it is
+// wide: past that the view ray exits the feature and the march correctly finds
+// the background behind it. A finger 18 px across that needs 56 px of travel to
+// keep up with the hand therefore gets clamped to a few px and reads as frozen,
+// while the torso — hundreds of px wide — travels the full amount.
+//
+// Widening the *thin* parts of the depth map buys back that travel. Thickness
+// comes from a wide blur of the mask, so this leaves the torso alone and grows
+// fingers and limb edges. The cost is real: the widened band is background
+// pixels now carrying near depth, so a little of the crowd travels with the
+// finger. That trades a visible freeze for a subtle smear, which reads better.
+// A proper fix is inpainting the dis-occluded region, which needs layers.
+if thinDilate > 0 {
+  let thickness = greyBytes(blurred(ciFromGrey(heroUnion), Float(max(W, H)) / 40.0))
+  let grown = greyBytes(blurred(ciFromGrey(heroUnion), thinDilate / 1.5))
+  var widened = 0
+  for i in 0..<(W * H) {
+    guard heroUnion[i] < 128 else { continue }
+    let nearHeroEdge = grown[i] >= 13
+    let isThin = Float(thickness[i]) / 255.0 < thinCut
+    if nearHeroEdge && isThin { heroUnion[i] = 255; widened += 1 }
+  }
+  FileHandle.standardError.write(
+    String(format: "thin-dilate widened %.2f%% of frame\n",
+           Double(widened) / Double(W * H) * 100).data(using: .utf8)!)
 }
 
 let heroImage = ciFromGrey(heroUnion)

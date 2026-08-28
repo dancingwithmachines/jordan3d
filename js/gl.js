@@ -77,13 +77,19 @@ export function createTexture(gl, source) {
   return { tex, width: source.width, height: source.height };
 }
 
+// Loading with ?fresh on the page URL appends a cache-buster. Browsers hold on
+// to a regenerated depth map hard, and measuring a stale one sends you chasing
+// bugs that are already fixed.
 export function loadImage(url) {
+  const fresh = typeof location !== 'undefined'
+    && new URLSearchParams(location.search).has('fresh');
+  const src = fresh ? `${url}${url.includes('?') ? '&' : '?'}cb=${Date.now()}` : url;
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error(`could not load ${url}`));
-    img.src = url;
+    img.src = src;
   });
 }
 

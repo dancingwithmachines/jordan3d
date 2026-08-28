@@ -19,8 +19,13 @@ export const params = {
   stageHeight: 1200, // stage height in CSS px; width follows the plate's aspect
 
   // --- the parallax itself ---
-  depthScale: 0.045, // how far the near plane slides, in uv units
-  focus: 0.5,        // depth that stays pinned: 0 = far, 1 = near
+  depthScale: 0.05,  // how far the near plane slides, in uv units
+  // Focus sits ON the subject, not midway. A near feature can only displace
+  // about as far as it is wide before the view ray exits it, so demanding 50+
+  // px of travel from an 18 px finger deforms the hand instead of moving it.
+  // Pinning the subject keeps his travel small and coherent and lets the
+  // background carry the parallax, which is where the depth reads anyway.
+  focus: 0.72,       // depth that stays pinned: 0 = far, 1 = near
   steps: 24,         // ray-march steps; more = finer edge placement
   refine: 4,         // binary steps tightening the hit, cheap and worth it
   smooth: 0.0,       // depth blur in texels. 0 because the map is pre-softened

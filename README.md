@@ -37,7 +37,13 @@ being bandwidth-bound on a single-channel depth texture.
 ./sync.sh
 ```
 
-Then start the `jordan3d` preview server (port 4322). The sync step exists
+Then start the `jordan3d` preview server (port 4322), which runs
+`tools/serve.py` — a static server that sends `no-store` on everything.
+That matters more than it sounds: the default `http.server` lets the browser
+hold on to ES modules and image assets, so after regenerating a depth map or
+editing `config.js` you can spend a long time measuring the *previous* build
+and concluding your change did nothing. Loading with `?fresh` additionally
+cache-busts asset URLs. The sync step exists
 because macOS TCC stops the preview server reading `~/Desktop` directly — it
 serves a mirror from `/tmp/jordan3d-preview`. **Re-run `sync.sh` after every
 edit** or you are looking at stale files.
@@ -214,6 +220,37 @@ row to row. That row-to-row disagreement *was* the visible glitching.
 Silhouettes were then checked at 4–5x magnification at both extremes of travel
 (`J3D.inspect`) — the defender translates rigidly, arm attached to shoulder,
 and Jordan's outstretched hand and wristband hold together.
+
+## The width limit — read this before tuning `depthScale`
+
+A near feature can only displace about as far as **it is wide**. Past that the
+view ray exits the feature and the march correctly finds the background behind
+it. So displacement is silently clamped by local width:
+
+| feature | width | wanted | got |
+|---|---|---|---|
+| torso | 200+ px | full | full |
+| hand | ~85 px | ~54 px | partial |
+| finger | ~18 px | ~54 px | a few px |
+
+A hand therefore does not travel — it *deforms*, and thin digits read as frozen
+while the body moves. No matte fix helps, because the depth map is already
+correct; the geometry of the technique is the constraint.
+
+Two levers, and the second is the one to reach for:
+
+- **`--thin-dilate <px>`** widens thin parts of the depth map (thickness comes
+  from a wide blur of the mask, so the torso is left alone) to buy back travel.
+  It works, but the widened band is background carrying near depth, so a halo
+  of crowd travels with the finger — clearly visible around the hand at 20 px.
+  Off by default.
+- **Put `focus` on the subject.** `focus` is the depth that stays pinned, so
+  parking it on the hero makes his travel small and coherent and lets the
+  background carry the parallax. That is why this project ships `focus: 0.72`
+  against a subject at 0.84–0.94 rather than a midway 0.5. The depth still
+  reads — arguably better, since the crowd sliding behind a stable figure is
+  the more filmic effect — and the hand stops deforming. Drag `focus` toward
+  0.5 in the panel to trade that back for more subject motion.
 
 ## Known limitation
 
