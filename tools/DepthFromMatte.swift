@@ -31,7 +31,7 @@ func fail(_ msg: String) -> Never {
 
 // ------------------------------------------------------------------- options
 
-var input = "", output = "", matteOut = ""
+var input = "", output = "", matteOut = "", personOut = ""
 var near: Float = 0.86         // subject depth
 var bgTop: Float = 0.06        // background at the top of the frame
 var bgBottom: Float = 0.42     // background at the bottom
@@ -41,6 +41,9 @@ var heroFill: Float = 70       // px reach for recovering thin bits Vision misse
 var heroThresh: Float = 0.55   // person-mask value that counts as the hero
 var tilt: Float = 0            // depth spread across the subject; 0 = flat cutout
 var tiltDeg: Float = 135       // direction that gets *nearer*; y counts downward
+// Elliptical regions forced into the hero, as cx,cy,rx,ry in fractions of the
+// image. For body parts Vision drops entirely — see --patch below.
+var patches: [(cx: Float, cy: Float, rx: Float, ry: Float, skin: Bool)] = []
 var mid: Float = 0.55          // depth for secondary figures
 var midLo: Float = 0.25        // person-mask value where a secondary figure starts
 var midHi: Float = 0.60        // ...and where it counts fully. Below midLo = crowd.
@@ -58,6 +61,7 @@ while let flag = args.first {
   case "--in":       input = value()
   case "--out":      output = value()
   case "--matte":    matteOut = value()
+  case "--person-out": personOut = value()   // debug: dump the raw person mask
   case "--near":     near = Float(value()) ?? near
   case "--bg-top":   bgTop = Float(value()) ?? bgTop
   case "--bg-bottom": bgBottom = Float(value()) ?? bgBottom
@@ -66,6 +70,14 @@ while let flag = args.first {
   case "--hero-thresh": heroThresh = Float(value()) ?? heroThresh
   case "--tilt":     tilt = Float(value()) ?? tilt
   case "--tilt-deg": tiltDeg = Float(value()) ?? tiltDeg
+  case "--patch":
+    let f = value().split(separator: ",").compactMap { Float($0) }
+    if f.count != 4 && f.count != 5 {
+      fail("--patch wants cx,cy,rx,ry[,skin] as fractions of the image")
+    }
+    // skin defaults to 1: only warm pixels are taken. Pass 0 for a purely
+    // geometric fill, for a highlight too washed out to read as skin.
+    patches.append((cx: f[0], cy: f[1], rx: f[2], ry: f[3], skin: f.count == 5 ? f[4] != 0 : true))
   case "--feather":  feather = Float(value()) ?? feather
   case "--mid":      mid = Float(value()) ?? mid
   case "--mid-lo":   midLo = Float(value()) ?? midLo
@@ -87,6 +99,21 @@ guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: input) as CFURL,
 let W = cgImage.width, H = cgImage.height
 
 // ------------------------------------------------------------ subject matte
+
+/// Source pixels, RGBA, row 0 = top. Used by --patch to tell skin from crowd.
+func rgbaBytes(_ image: CGImage) -> [UInt8] {
+  var bytes = [UInt8](repeating: 0, count: W * H * 4)
+  bytes.withUnsafeMutableBytes { raw in
+    guard let ctx = CGContext(data: raw.baseAddress, width: W, height: H,
+                              bitsPerComponent: 8, bytesPerRow: W * 4,
+                              space: CGColorSpaceCreateDeviceRGB(),
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+      fail("could not create rgb context")
+    }
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: W, height: H))
+  }
+  return bytes
+}
 
 let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
 let request = VNGenerateForegroundInstanceMaskRequest()
@@ -188,6 +215,44 @@ if heroFill > 0, let pObs = persons.results?.first {
            Double(recovered) / Double(W * H) * 100).data(using: .utf8)!)
 } else {
   for i in 0..<(W * H) { heroUnion[i] = instanceRaw[i] >= 128 ? 255 : 0 }
+}
+
+// Manual patches. Vision can drop a body part outright — on the Jordan frame
+// it loses the thumb and index finger of the near hand, where skin meets pale
+// crowd, and *both* the instance matte and person segmentation have the same
+// hole, so no threshold recovers them. Those digits then sat at background
+// depth and travelled opposite to the hand they belong to.
+//
+// A patch forces an ellipse into the hero, so the region picks up the hero's
+// depth (tilt included) rather than a hand-typed number. It is gated on a skin
+// test, so an ellipse drawn slightly loose grabs the finger and not the pale
+// crowd behind it.
+if !patches.isEmpty {
+  let photo = rgbaBytes(cgImage)
+  var added = 0
+  for patch in patches {
+    let cx = patch.cx * Float(W), cy = patch.cy * Float(H)
+    let rx = max(patch.rx * Float(W), 1), ry = max(patch.ry * Float(H), 1)
+    let x0 = max(0, Int(cx - rx)), x1 = min(W - 1, Int(cx + rx))
+    let y0 = max(0, Int(cy - ry)), y1 = min(H - 1, Int(cy + ry))
+    for y in y0...y1 {
+      for x in x0...x1 {
+        let nx = (Float(x) - cx) / rx, ny = (Float(y) - cy) / ry
+        if nx * nx + ny * ny > 1 { continue }
+        let i = y * W + x
+        if heroUnion[i] > 127 { continue }
+        let r = Int(photo[i * 4]), g = Int(photo[i * 4 + 1]), b = Int(photo[i * 4 + 2])
+        // skin: warm and not washed out. The crowd here is bright and neutral.
+        // Lit skin on a highlight reads much less warm than shadowed skin, so
+        // this is deliberately loose; the pale crowd behind sits under 18.
+        let isSkin = r > 80 && r >= g && g >= b && (r - b) > 18
+        if !patch.skin || isSkin { heroUnion[i] = 255; added += 1 }
+      }
+    }
+  }
+  FileHandle.standardError.write(
+    String(format: "patches added %.3f%% of frame\n",
+           Double(added) / Double(W * H) * 100).data(using: .utf8)!)
 }
 
 let heroImage = ciFromGrey(heroUnion)
@@ -308,6 +373,11 @@ func writePNG(_ bytes: [UInt8], to path: String) {
 
 writePNG(depth, to: output)
 if !matteOut.isEmpty { writePNG(matte, to: matteOut) }
+if !personOut.isEmpty, let pObs = persons.results?.first {
+  let pci = CIImage(cvPixelBuffer: pObs.pixelBuffer)
+  writePNG(greyBytes(pci.transformed(by: CGAffineTransform(
+    scaleX: CGFloat(W) / pci.extent.width, y: CGFloat(H) / pci.extent.height))), to: personOut)
+}
 
 let coverage = Double(subjectPixels) / Double(W * H) * 100
 let secondary = Double(secondaryPixels) / Double(W * H) * 100

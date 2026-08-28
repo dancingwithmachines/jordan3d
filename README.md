@@ -69,7 +69,9 @@ With no files at all it falls back to a synthetic test scene
 ```bash
 ./tools/make_depth.sh --in assets/Jordan_Dunk.jpg --out assets/depth.png \
   --matte grabs/matte.png --bg-top 0.26 --bg-bottom 0.34 \
-  --tilt 0.22 --tilt-deg 135
+  --tilt 0.22 --tilt-deg 135 \
+  --patch 0.3575,0.5690,0.0104,0.0220,0 \
+  --patch 0.3450,0.5994,0.0100,0.0113
 ```
 
 This runs entirely on this machine — the image is never uploaded. It uses
@@ -89,6 +91,24 @@ from two of them:
   the torso, so it moves about 30% further. This is authored, not measured — it
   says "this end of him is closer", which is enough to sell a limb reaching
   toward the lens, but it cannot know that a wrist bends.
+- **`--patch cx,cy,rx,ry[,skin]`** → forces an ellipse into the hero, in
+  fractions of the image. Repeatable. Vision can drop a body part outright: on
+  this frame it loses the thumb and index finger of the near hand where skin
+  meets pale crowd, and the instance matte and person segmentation have the
+  *same* hole, so no threshold recovers them and `VNDetectHumanHandPoseRequest`
+  finds only the defender's hands. Those digits sat at background depth and
+  travelled opposite to the hand they belong to.
+
+  A patch adds to the hero mask rather than writing a depth, so the region
+  inherits the hero's depth including tilt — no hand-typed number to keep in
+  sync. `skin` defaults to 1, taking only warm pixels so a loosely drawn
+  ellipse grabs the finger and not the crowd; pass 0 for a purely geometric
+  fill where a lit highlight is too washed out to read as skin, as the thumb
+  is here. Measured after: the thumb band reads 0.918–0.933 against 0.941 for
+  the palm, falling to background 0.306 within ~10 px.
+
+  This is hand retouching, and it is per-image — the coordinates mean nothing
+  for a different photograph. A monocular depth model would not need it.
 - **`--relief`** → rounds the subject toward its silhouette using a wide blur
   as a stand-in for a distance transform. **Defaults to 0**, because it pushes
   *thin* features backward — an outstretched hand, physically the nearest thing
