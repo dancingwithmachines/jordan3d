@@ -24,6 +24,7 @@ out vec4 fragColor;
 
 uniform sampler2D uBg;
 uniform sampler2D uSprite;
+uniform sampler2D uSubjDepth;   // smooth depth *within* the subject
 
 uniform vec2  uUvScale;
 uniform vec2  uUvOffset;
@@ -33,7 +34,8 @@ uniform float uDepthScale;
 uniform float uFocus;
 uniform float uBgTop;        // background depth at the top of the frame
 uniform float uBgBottom;     // ...and at the bottom
-uniform float uSpriteDepth;  // one value: the sprite moves rigidly
+uniform float uSpriteDepth;  // the flat fallback, when relief is 0
+uniform float uRelief;       // 0 = flat cutout, 1 = full subject depth
 uniform vec3  uBackground;
 
 void main() {
@@ -42,7 +44,16 @@ void main() {
   // vUv counts up; the ramp was authored top-down, so flip for the lookup.
   float bgDepth = mix(uBgTop, uBgBottom, 1.0 - base.y);
   vec2 bgUv = base + uParallax * uDepthScale * (bgDepth - uFocus);
-  vec2 spUv = base + uParallax * uDepthScale * (uSpriteDepth - uFocus);
+
+  // Depth inside the sprite is smooth — the hard subject/background edge is
+  // alpha's job here, not depth's — so this needs no search along the ray and
+  // therefore cannot clamp a thin feature the way the single-plate march does.
+  // One refinement pass is plenty on a field this gentle.
+  vec2 off = uParallax * uDepthScale;
+  float sd = mix(uSpriteDepth, texture(uSubjDepth, base).r, uRelief);
+  vec2 spUv = base + off * (sd - uFocus);
+  sd = mix(uSpriteDepth, texture(uSubjDepth, spUv).r, uRelief);
+  spUv = base + off * (sd - uFocus);
 
   vec3 bg = texture(uBg, bgUv).rgb;
 

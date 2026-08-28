@@ -9,6 +9,7 @@ export const paths = {
   // Layered mode. Built by tools/split_layers.sh.
   bg: 'assets/bg.jpg',
   sprite: 'assets/subject.png',
+  spriteDepth: 'assets/subject_depth.png',
 
   // Used only if the two above are missing, so the page is never blank.
   // Regenerate with: python3 tools/make_test_scene.py
@@ -37,7 +38,11 @@ export const params = {
   invert: 0,         // 1 if your map is near-dark / far-light
 
   // --- layered mode ---
-  spriteDepth: 0.86, // one depth for the whole subject, so it travels rigidly
+  // 0 = flat cutout, 1 = the baked field as-is. Above 1 amplifies it, which is
+  // safe here — inside the sprite the field is smooth, so there is no cliff for
+  // a bigger displacement to tear against. Verified clean to 2.4.
+  subjectRelief: 2.0,
+  spriteDepth: 0.86,  // the flat fallback used when subjectRelief is 0
   bgTop: 0.26,       // must match what tools/make_depth.sh was given
   bgBottom: 0.34,
 
@@ -61,6 +66,7 @@ export const schema = [
   { key: 'stageHeight', label: 'height',   min: 400,  max: 2400, step: 10 },
   { key: 'fit',        label: 'fit',       options: ['contain', 'cover'] },
   { key: 'mode',       label: 'mode',      options: ['layers', 'depth'] },
+  { key: 'subjectRelief', label: 'subject 3D', min: 0, max: 3, step: 0.05 },
   { key: 'spriteDepth', label: 'subject Z', min: 0.4, max: 1,  step: 0.005 },
   { key: 'bgTop',      label: 'bg top',    min: 0,    max: 0.8, step: 0.01 },
   { key: 'bgBottom',   label: 'bg btm',    min: 0,    max: 0.8, step: 0.01 },

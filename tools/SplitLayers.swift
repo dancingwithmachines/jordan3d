@@ -26,7 +26,11 @@ func fail(_ msg: String) -> Never {
 
 // ------------------------------------------------------------------- options
 
-var input = "", bgOut = "", spriteOut = "", maskOut = ""
+var input = "", bgOut = "", spriteOut = "", maskOut = "", depthOut = ""
+var base: Float = 0.86     // the subject's overall depth
+var bulge: Float = 0.12    // how much rounder the core reads than the edges
+var tilt: Float = 0.14     // linear spread across the subject
+var tiltDeg: Float = 135   // direction that gets nearer; y counts downward
 var grow: Float = 4        // px to dilate the hole, so no subject edge is left behind
 var erode: Float = 1       // px to pull the sprite edge in, against crowd fringing
 var feather: Float = 1.2   // sprite alpha softening
@@ -48,6 +52,11 @@ while let flag = args.first {
   case "--bg":      bgOut = value()
   case "--sprite":  spriteOut = value()
   case "--mask":    maskOut = value()
+  case "--depth":   depthOut = value()
+  case "--base":    base = Float(value()) ?? base
+  case "--bulge":   bulge = Float(value()) ?? bulge
+  case "--tilt":    tilt = Float(value()) ?? tilt
+  case "--tilt-deg": tiltDeg = Float(value()) ?? tiltDeg
   case "--grow":    grow = Float(value()) ?? grow
   case "--erode":   erode = Float(value()) ?? erode
   case "--feather": feather = Float(value()) ?? feather
@@ -436,6 +445,61 @@ for i in 0..<(W * H) {
   spriteBytes[i*4+3] = alphaSoft[i]
 }
 writeRGBA(spriteBytes, to: spriteOut)
+
+// ------------------------------------------------- depth *within* the subject
+//
+// Layered compositing hands the subject-to-background cliff to alpha, so the
+// depth field inside the sprite is smooth — no cliff, therefore no ray march,
+// therefore none of the width clamping that punished thin features on a single
+// plate. That means the subject can carry real volume again while a fingertip
+// still travels with the palm.
+//
+// Two smooth cues, both authored:
+//
+//   bulge — a wide blur of the mask stands in for thickness, so the core reads
+//           nearer than the edges and he is round rather than a cutout.
+//   tilt  — a linear gradient, so a limb reaching toward the lens leads.
+//
+// Defined everywhere, not just under the mask: outside the silhouette thickness
+// falls to zero and the tilt still evaluates, so the field stays continuous and
+// bilinear filtering at the sprite edge has nothing to catch on.
+if !depthOut.isEmpty {
+  let thickness = greyBytes(blurred(ciFromGrey(subject), Float(max(W, H)) / 26.0))
+
+  var tMin = Float.greatestFiniteMagnitude, tMax = -Float.greatestFiniteMagnitude
+  let rad = tiltDeg * Float.pi / 180
+  let ax = cos(rad), ay = sin(rad)
+  if tilt != 0 {
+    for y in 0..<H {
+      for x in 0..<W where subject[y * W + x] > 127 {
+        let p = Float(x) * ax + Float(y) * ay
+        tMin = min(tMin, p); tMax = max(tMax, p)
+      }
+    }
+  }
+  let span = max(tMax - tMin, 1)
+
+  var d = [UInt8](repeating: 0, count: W * H)
+  var lo: Float = 1, hi: Float = 0
+  for y in 0..<H {
+    for x in 0..<W {
+      let i = y * W + x
+      var v = base + bulge * (Float(thickness[i]) / 255.0)
+      if tilt != 0 {
+        let p = Float(x) * ax + Float(y) * ay
+        v += tilt * ((p - tMin) / span - 0.5)
+      }
+      if subject[i] > 127 { lo = min(lo, v); hi = max(hi, v) }
+      d[i] = UInt8(max(0, min(255, v * 255 + 0.5)))
+    }
+  }
+  var m = [UInt8](repeating: 0, count: W * H * 4)
+  for i in 0..<(W * H) { for k in 0..<3 { m[i*4+k] = d[i] }; m[i*4+3] = 255 }
+  writeRGBA(m, to: depthOut)
+  FileHandle.standardError.write(
+    String(format: "subject depth spans %.3f..%.3f (base %.2f, bulge %.2f, tilt %.2f)\n",
+           lo, hi, base, bulge, tilt).data(using: .utf8)!)
+}
 
 if !maskOut.isEmpty {
   var m = [UInt8](repeating: 0, count: W * H * 4)

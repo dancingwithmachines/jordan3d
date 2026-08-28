@@ -15,6 +15,7 @@ let color = null;          // { tex, width, height }
 let depth = null;
 let bg = null;             // layered mode: pre-filled background plate
 let sprite = null;         // layered mode: subject cut-out, with alpha
+let subjDepth = null;      // layered mode: depth within the subject
 let placeholder = false;   // depth is luminance-derived, not real
 let inspect = null;        // { cx, cy, z } magnifier, for checking edge artefacts
 
@@ -64,6 +65,11 @@ function setBg(gl, source) {
 function setSprite(gl, source) {
   if (sprite) gl.deleteTexture(sprite.tex);
   sprite = createTexture(gl, source);
+}
+
+function setSubjDepth(gl, source) {
+  if (subjDepth) gl.deleteTexture(subjDepth.tex);
+  subjDepth = createTexture(gl, source);
 }
 
 function setPlaceholder(gl, source) {
@@ -162,9 +168,12 @@ async function main() {
 
   // Layered assets are optional — without them the mode falls back.
   try {
-    const [bgImg, spriteImg] = await Promise.all([loadImage(paths.bg), loadImage(paths.sprite)]);
+    const [bgImg, spriteImg, sdImg] = await Promise.all([
+      loadImage(paths.bg), loadImage(paths.sprite), loadImage(paths.spriteDepth),
+    ]);
     setBg(gl, bgImg);
     setSprite(gl, spriteImg);
+    setSubjDepth(gl, sdImg);
   } catch {
     if (P.mode === 'layers') {
       P.mode = 'depth';
@@ -180,6 +189,7 @@ async function main() {
   gl.useProgram(layered.prog);
   gl.uniform1i(layered.uniforms.uBg, 0);
   gl.uniform1i(layered.uniforms.uSprite, 1);
+  gl.uniform1i(layered.uniforms.uSubjDepth, 2);
   gl.uniform3f(layered.uniforms.uBackground, background[0], background[1], background[2]);
 
   let last = performance.now();
@@ -205,7 +215,7 @@ async function main() {
       offset = [inspect.cx - 0.5, inspect.cy - 0.5];
     }
 
-    const useLayers = P.mode === 'layers' && bg && sprite;
+    const useLayers = P.mode === 'layers' && bg && sprite && subjDepth;
     const { prog, uniforms, vao } = useLayers ? layered : single;
     gl.useProgram(prog);
     gl.bindVertexArray(vao);
@@ -213,6 +223,8 @@ async function main() {
     if (useLayers) {
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, bg.tex);
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, sprite.tex);
+      gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, subjDepth.tex);
+      gl.uniform1f(uniforms.uRelief, P.subjectRelief);
       gl.uniform1f(uniforms.uBgTop, P.bgTop);
       gl.uniform1f(uniforms.uBgBottom, P.bgBottom);
       gl.uniform1f(uniforms.uSpriteDepth, P.spriteDepth);

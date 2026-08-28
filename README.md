@@ -223,16 +223,40 @@ The fill being **static** is the point. The single-plate smear is objectionable
 largely because it changes every frame; a fixed, slightly-odd patch of crowd
 reads as crowd.
 
-### What layers give up
+### Depth within the subject
 
-The sprite is one flat depth, so there is no parallax *within* the subject — his
-hand no longer sits nearer than his chest. That is the trade for coherence, and
-on balance the right one, since intra-subject depth is exactly what the width
-limit punishes. A gentle depth *inside* the sprite is possible later; keep the
-differential small or the clamp returns.
+The sprite is not flat. `assets/subject_depth.png`, also written by
+`split_layers.sh`, carries a smooth depth field over the subject, blended in by
+`subjectRelief` (0 = flat cutout, 1 = the field as baked, above 1 amplifies).
 
-The rim and net still live in the background layer, so they drift with the
-crowd. A third layer would fix that.
+The reason this is safe is worth stating, because it is the whole argument for
+layers. On a single plate, depth has to encode the subject/background cliff, and
+a march across that cliff is what clamps thin features. **Here alpha owns the
+cliff**, so the field inside the sprite is smooth — no search along the ray, no
+clamp. A fingertip travels with its palm no matter how much volume the subject
+carries.
+
+Two authored cues, both from the mask:
+
+- **`--bulge`** uses a wide blur of the mask as a thickness proxy, so the core
+  reads nearer than the edges and he is round rather than a cutout.
+- **`--tilt` / `--tilt-deg`** adds a linear gradient, so a limb reaching toward
+  the lens leads.
+
+Measured on this frame at `subjectRelief` 1.0, travel across a full sweep:
+
+| hand (thumb tip, index tip, palm) | torso | far leg | head | ball | crowd |
+|---|---|---|---|---|---|
+| −76 | −72 | −70 | −64 | −60 | +40 |
+
+The three hand figures are *identical*, so the hand still moves as one piece
+while his body carries a real gradient. Verified clean to `subjectRelief` 2.4 —
+face, jersey trim and lettering all hold with no warping.
+
+### What layers still give up
+
+The rim and net live in the background layer, so they drift with the crowd. A
+third layer would fix that, and the machinery now exists.
 
 ## Known limitation
 
