@@ -37,13 +37,7 @@ being bandwidth-bound on a single-channel depth texture.
 ./sync.sh
 ```
 
-Then start the `jordan3d` preview server (port 4322), which runs
-`tools/serve.py` — a static server that sends `no-store` on everything.
-That matters more than it sounds: the default `http.server` lets the browser
-hold on to ES modules and image assets, so after regenerating a depth map or
-editing `config.js` you can spend a long time measuring the *previous* build
-and concluding your change did nothing. Loading with `?fresh` additionally
-cache-busts asset URLs. The sync step exists
+Then start the `jordan3d` preview server (port 4322). The sync step exists
 because macOS TCC stops the preview server reading `~/Desktop` directly — it
 serves a mirror from `/tmp/jordan3d-preview`. **Re-run `sync.sh` after every
 edit** or you are looking at stale files.
@@ -74,75 +68,17 @@ With no files at all it falls back to a synthetic test scene
 
 ```bash
 ./tools/make_depth.sh --in assets/Jordan_Dunk.jpg --out assets/depth.png \
-  --matte grabs/matte.png --bg-top 0.26 --bg-bottom 0.34 \
-  --tilt 0.22 --tilt-deg 135 \
-  --patch 0.3575,0.5690,0.0104,0.0220,0 \
-  --patch 0.3450,0.5994,0.0100,0.0113 \
-  --patch 0.4657,0.2083,0.1071,0.0982,0
+  --matte grabs/matte.png --bg-top 0.26 --bg-bottom 0.34
 ```
-
-The third patch is a **cushion** — see below.
 
 This runs entirely on this machine — the image is never uploaded. It uses
 Apple's Vision framework, which gives *mattes*, not depth, so depth is composed
 from two of them:
 
-- **Foreground instance matte** → the hero subject, placed at `--near` (0.86).
-  Thin, low-contrast extremities get dropped by this matte, so `--hero-fill`
-  (70 px) accepts person-segmentation pixels *within that radius of the matte*:
-  a gap adjacent to the hero is filled, while a second figure hundreds of px
-  away never qualifies.
-- **`--tilt`** → depth spread linearly across the hero, `--tilt-deg` naming the
-  direction that gets nearer (135° = toward the lower left, y counting down).
-  A matte carries no depth *within* a subject, so a flat cutout makes an
-  outstretched hand travel exactly like the chest behind it and the limb reads
-  as stiff. At 0.22/135° on this frame the hand sits at 0.945 against 0.839 for
-  the torso, so it moves about 30% further. This is authored, not measured — it
-  says "this end of him is closer", which is enough to sell a limb reaching
-  toward the lens, but it cannot know that a wrist bends.
-- **`--patch cx,cy,rx,ry[,skin]`** → forces an ellipse into the hero, in
-  fractions of the image. Repeatable. Vision can drop a body part outright: on
-  this frame it loses the thumb and index finger of the near hand where skin
-  meets pale crowd, and the instance matte and person segmentation have the
-  *same* hole, so no threshold recovers them and `VNDetectHumanHandPoseRequest`
-  finds only the defender's hands. Those digits sat at background depth and
-  travelled opposite to the hand they belong to.
-
-  A patch adds to the hero mask rather than writing a depth, so the region
-  inherits the hero's depth including tilt — no hand-typed number to keep in
-  sync. `skin` defaults to 1, taking only warm pixels so a loosely drawn
-  ellipse grabs the finger and not the crowd; pass 0 for a purely geometric
-  fill where a lit highlight is too washed out to read as skin, as the thumb
-  is here. Measured after: the thumb band reads 0.918–0.933 against 0.941 for
-  the palm, falling to background 0.306 within ~10 px.
-
-  This is hand retouching, and it is per-image — the coordinates mean nothing
-  for a different photograph. A monocular depth model would not need it.
-
-  **Cushions.** The same flag solves a different problem. Dis-occlusion smear
-  always lands on the depth cliff at a subject's silhouette, and against a face
-  that is ruinous: the background streaks horizontally along the profile and
-  bright lip and nose highlights bleed into it, which reads as the nose and
-  mouth distorting even though they are perfectly rigid.
-
-  The smear cannot be removed without inpainting, but it can be *moved*. Draw a
-  geometric patch generously around the head so a margin of background is
-  included at the subject's depth. Everything from the profile out to that
-  boundary now travels together, so there is no cliff at the face — the cliff,
-  and the smear with it, relocates to the patch boundary out in dark,
-  out-of-focus crowd where nothing reads.
-
-  Size the margin wider than the smear itself, or it lands back on the face.
-  Smear width is `depthScale x (subject - background) x |view|` in uv; on this
-  frame that is ~37 px at full deflection, so the head patch uses ~55 px of
-  margin. Pick a boundary that falls in dark or defocused background — this
-  trades a visible artefact for an invisible one, so where it lands matters.
-- **`--relief`** → rounds the subject toward its silhouette using a wide blur
-  as a stand-in for a distance transform. **Defaults to 0**, because it pushes
-  *thin* features backward — an outstretched hand, physically the nearest thing
-  in shot, ends up further away than the chest. It also washed a ~36 px ramp
-  across the silhouette, which smeared detail as fine as a nose or lips. Only
-  useful on a broad, blobby subject.
+- **Foreground instance matte** → the hero subject, placed at `--near` (0.86)
+  and rounded slightly toward its silhouette so it does not read as a flat
+  card. A heavily blurred copy of the matte stands in for a distance
+  transform.
 - **Everything else** → a vertical ramp from `--bg-top` to `--bg-bottom`. The
   tool defaults (0.06 → 0.42) suit a scene with a floor receding to a back
   wall. **This frame is not one** — it is a telephoto shot of a crowd *wall* at
@@ -215,7 +151,7 @@ prints the current values in `js/config.js` shape, ready to paste over
 | `crop`      | zoom in so displacement never samples past the plate edge.       |
 | `steps`     | ray-march steps. 24 is the default; below ~12 edges quantise.    |
 | `refine`    | binary steps tightening the hit. 4 is plenty, and cheap.          |
-| `smooth`    | depth blur in texels. 0 by default — the generated map is crisp on purpose, and blurring it here is what smears fine features like a nose or lips. Raise it only for a map from elsewhere with JPEG steps along its edges. |
+| `smooth`    | depth blur in texels. 0 by default — the generated map is already pre-softened. Raise it for a map from elsewhere with JPEG steps along its edges. |
 | `dilate`    | biases edges toward the nearer surface. 0 by default; the march handles occlusion properly now, so this is only a rescue for a bad map. |
 | `stageHeight` | stage height in CSS px. Width follows the plate's aspect ratio, so the stage never letterboxes and never distorts. If it is taller than the window, the page scrolls. |
 | `invert`    | set to 1 for dark-near maps.                                     |
@@ -242,37 +178,6 @@ row to row. That row-to-row disagreement *was* the visible glitching.
 Silhouettes were then checked at 4–5x magnification at both extremes of travel
 (`J3D.inspect`) — the defender translates rigidly, arm attached to shoulder,
 and Jordan's outstretched hand and wristband hold together.
-
-## The width limit — read this before tuning `depthScale`
-
-A near feature can only displace about as far as **it is wide**. Past that the
-view ray exits the feature and the march correctly finds the background behind
-it. So displacement is silently clamped by local width:
-
-| feature | width | wanted | got |
-|---|---|---|---|
-| torso | 200+ px | full | full |
-| hand | ~85 px | ~54 px | partial |
-| finger | ~18 px | ~54 px | a few px |
-
-A hand therefore does not travel — it *deforms*, and thin digits read as frozen
-while the body moves. No matte fix helps, because the depth map is already
-correct; the geometry of the technique is the constraint.
-
-Two levers, and the second is the one to reach for:
-
-- **`--thin-dilate <px>`** widens thin parts of the depth map (thickness comes
-  from a wide blur of the mask, so the torso is left alone) to buy back travel.
-  It works, but the widened band is background carrying near depth, so a halo
-  of crowd travels with the finger — clearly visible around the hand at 20 px.
-  Off by default.
-- **Put `focus` on the subject.** `focus` is the depth that stays pinned, so
-  parking it on the hero makes his travel small and coherent and lets the
-  background carry the parallax. That is why this project ships `focus: 0.72`
-  against a subject at 0.84–0.94 rather than a midway 0.5. The depth still
-  reads — arguably better, since the crowd sliding behind a stable figure is
-  the more filmic effect — and the hand stops deforming. Drag `focus` toward
-  0.5 in the panel to trade that back for more subject motion.
 
 ## Known limitation
 

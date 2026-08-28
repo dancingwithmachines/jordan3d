@@ -31,21 +31,12 @@ func fail(_ msg: String) -> Never {
 
 // ------------------------------------------------------------------- options
 
-var input = "", output = "", matteOut = "", personOut = ""
+var input = "", output = "", matteOut = ""
 var near: Float = 0.86         // subject depth
 var bgTop: Float = 0.06        // background at the top of the frame
 var bgBottom: Float = 0.42     // background at the bottom
-var relief: Float = 0          // subject edge rounding; 0 keeps fine detail crisp
-var feather: Float = 2.0       // matte edge softening, in pixels
-var heroFill: Float = 70       // px reach for recovering thin bits Vision missed
-var heroThresh: Float = 0.55   // person-mask value that counts as the hero
-var thinDilate: Float = 0      // px to widen *thin* parts of the hero; see below
-var thinCut: Float = 0.45      // thickness below which a region counts as thin
-var tilt: Float = 0            // depth spread across the subject; 0 = flat cutout
-var tiltDeg: Float = 135       // direction that gets *nearer*; y counts downward
-// Elliptical regions forced into the hero, as cx,cy,rx,ry in fractions of the
-// image. For body parts Vision drops entirely — see --patch below.
-var patches: [(cx: Float, cy: Float, rx: Float, ry: Float, skin: Bool)] = []
+var relief: Float = 0.12       // how much the subject rounds off toward its edge
+var feather: Float = 5.0       // matte edge softening, in pixels
 var mid: Float = 0.55          // depth for secondary figures
 var midLo: Float = 0.25        // person-mask value where a secondary figure starts
 var midHi: Float = 0.60        // ...and where it counts fully. Below midLo = crowd.
@@ -63,25 +54,10 @@ while let flag = args.first {
   case "--in":       input = value()
   case "--out":      output = value()
   case "--matte":    matteOut = value()
-  case "--person-out": personOut = value()   // debug: dump the raw person mask
   case "--near":     near = Float(value()) ?? near
   case "--bg-top":   bgTop = Float(value()) ?? bgTop
   case "--bg-bottom": bgBottom = Float(value()) ?? bgBottom
   case "--relief":   relief = Float(value()) ?? relief
-  case "--hero-fill":   heroFill = Float(value()) ?? heroFill
-  case "--hero-thresh": heroThresh = Float(value()) ?? heroThresh
-  case "--thin-dilate": thinDilate = Float(value()) ?? thinDilate
-  case "--thin-cut":    thinCut = Float(value()) ?? thinCut
-  case "--tilt":     tilt = Float(value()) ?? tilt
-  case "--tilt-deg": tiltDeg = Float(value()) ?? tiltDeg
-  case "--patch":
-    let f = value().split(separator: ",").compactMap { Float($0) }
-    if f.count != 4 && f.count != 5 {
-      fail("--patch wants cx,cy,rx,ry[,skin] as fractions of the image")
-    }
-    // skin defaults to 1: only warm pixels are taken. Pass 0 for a purely
-    // geometric fill, for a highlight too washed out to read as skin.
-    patches.append((cx: f[0], cy: f[1], rx: f[2], ry: f[3], skin: f.count == 5 ? f[4] != 0 : true))
   case "--feather":  feather = Float(value()) ?? feather
   case "--mid":      mid = Float(value()) ?? mid
   case "--mid-lo":   midLo = Float(value()) ?? midLo
@@ -104,21 +80,6 @@ let W = cgImage.width, H = cgImage.height
 
 // ------------------------------------------------------------ subject matte
 
-/// Source pixels, RGBA, row 0 = top. Used by --patch to tell skin from crowd.
-func rgbaBytes(_ image: CGImage) -> [UInt8] {
-  var bytes = [UInt8](repeating: 0, count: W * H * 4)
-  bytes.withUnsafeMutableBytes { raw in
-    guard let ctx = CGContext(data: raw.baseAddress, width: W, height: H,
-                              bitsPerComponent: 8, bytesPerRow: W * 4,
-                              space: CGColorSpaceCreateDeviceRGB(),
-                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
-      fail("could not create rgb context")
-    }
-    ctx.draw(image, in: CGRect(x: 0, y: 0, width: W, height: H))
-  }
-  return bytes
-}
-
 let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
 let request = VNGenerateForegroundInstanceMaskRequest()
 let persons = VNGeneratePersonSegmentationRequest()
@@ -126,7 +87,7 @@ persons.qualityLevel = .accurate
 persons.outputPixelFormat = kCVPixelFormatType_OneComponent8
 
 do {
-  try handler.perform(usePersons || heroFill > 0 ? [request, persons] : [request])
+  try handler.perform(usePersons ? [request, persons] : [request])
 } catch { fail("Vision failed: \(error)") }
 
 guard let observation = request.results?.first, !observation.allInstances.isEmpty else {
@@ -162,17 +123,6 @@ func greyBytes(_ image: CIImage) -> [UInt8] {
   return bytes
 }
 
-/// Wraps an 8-bit grey buffer back up as a CIImage so it can be blurred.
-func ciFromGrey(_ bytes: [UInt8]) -> CIImage {
-  guard let provider = CGDataProvider(data: Data(bytes) as CFData),
-        let cg = CGImage(width: W, height: H, bitsPerComponent: 8, bitsPerPixel: 8,
-                         bytesPerRow: W, space: grey,
-                         bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
-                         provider: provider, decode: nil, shouldInterpolate: false,
-                         intent: .defaultIntent) else { fail("could not wrap mask") }
-  return CIImage(cgImage: cg)
-}
-
 let maskImage = CIImage(cvPixelBuffer: maskBuffer)
   .transformed(by: CGAffineTransform(
     scaleX: CGFloat(W) / CGFloat(CVPixelBufferGetWidth(maskBuffer)),
@@ -188,111 +138,10 @@ func blurred(_ image: CIImage, _ radius: Float) -> CIImage {
   return out.cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
 }
 
-// The instance matte loses thin, low-contrast extremities: on the Jordan frame
-// it drops his outstretched fingers entirely, which then sit at background
-// depth and parallax *against* the arm they belong to.
-//
-// Person segmentation does resolve them, but it also lights up the crowd and
-// the other player, so it cannot simply be unioned in. Instead it is accepted
-// only within `heroFill` px of the instance matte: a gap adjacent to the hero
-// gets filled, while a second figure a few hundred px away never qualifies.
-let instanceRaw = greyBytes(maskImage)
-var heroUnion = [UInt8](repeating: 0, count: W * H)
-
-if heroFill > 0, let pObs = persons.results?.first {
-  let pci = CIImage(cvPixelBuffer: pObs.pixelBuffer)
-  let personRaw = greyBytes(pci.transformed(by: CGAffineTransform(
-    scaleX: CGFloat(W) / pci.extent.width, y: CGFloat(H) / pci.extent.height)))
-
-  // Blurring the matte and taking anything non-trivial approximates "within
-  // heroFill px of the hero".
-  let nearHero = greyBytes(blurred(maskImage, heroFill / 1.5))
-  var recovered = 0
-  for i in 0..<(W * H) {
-    let isHero = instanceRaw[i] >= 128
-    let adjacent = nearHero[i] >= 13 && Float(personRaw[i]) / 255.0 >= heroThresh
-    heroUnion[i] = (isHero || adjacent) ? 255 : 0
-    if !isHero && adjacent { recovered += 1 }
-  }
-  FileHandle.standardError.write(
-    String(format: "hero fill recovered %.2f%% of frame\n",
-           Double(recovered) / Double(W * H) * 100).data(using: .utf8)!)
-} else {
-  for i in 0..<(W * H) { heroUnion[i] = instanceRaw[i] >= 128 ? 255 : 0 }
-}
-
-// Manual patches. Vision can drop a body part outright — on the Jordan frame
-// it loses the thumb and index finger of the near hand, where skin meets pale
-// crowd, and *both* the instance matte and person segmentation have the same
-// hole, so no threshold recovers them. Those digits then sat at background
-// depth and travelled opposite to the hand they belong to.
-//
-// A patch forces an ellipse into the hero, so the region picks up the hero's
-// depth (tilt included) rather than a hand-typed number. It is gated on a skin
-// test, so an ellipse drawn slightly loose grabs the finger and not the pale
-// crowd behind it.
-if !patches.isEmpty {
-  let photo = rgbaBytes(cgImage)
-  var added = 0
-  for patch in patches {
-    let cx = patch.cx * Float(W), cy = patch.cy * Float(H)
-    let rx = max(patch.rx * Float(W), 1), ry = max(patch.ry * Float(H), 1)
-    let x0 = max(0, Int(cx - rx)), x1 = min(W - 1, Int(cx + rx))
-    let y0 = max(0, Int(cy - ry)), y1 = min(H - 1, Int(cy + ry))
-    for y in y0...y1 {
-      for x in x0...x1 {
-        let nx = (Float(x) - cx) / rx, ny = (Float(y) - cy) / ry
-        if nx * nx + ny * ny > 1 { continue }
-        let i = y * W + x
-        if heroUnion[i] > 127 { continue }
-        let r = Int(photo[i * 4]), g = Int(photo[i * 4 + 1]), b = Int(photo[i * 4 + 2])
-        // skin: warm and not washed out. The crowd here is bright and neutral.
-        // Lit skin on a highlight reads much less warm than shadowed skin, so
-        // this is deliberately loose; the pale crowd behind sits under 18.
-        let isSkin = r > 80 && r >= g && g >= b && (r - b) > 18
-        if !patch.skin || isSkin { heroUnion[i] = 255; added += 1 }
-      }
-    }
-  }
-  FileHandle.standardError.write(
-    String(format: "patches added %.3f%% of frame\n",
-           Double(added) / Double(W * H) * 100).data(using: .utf8)!)
-}
-
-// Widening thin parts of the subject.
-//
-// In this technique a near feature can only displace about as far as it is
-// wide: past that the view ray exits the feature and the march correctly finds
-// the background behind it. A finger 18 px across that needs 56 px of travel to
-// keep up with the hand therefore gets clamped to a few px and reads as frozen,
-// while the torso — hundreds of px wide — travels the full amount.
-//
-// Widening the *thin* parts of the depth map buys back that travel. Thickness
-// comes from a wide blur of the mask, so this leaves the torso alone and grows
-// fingers and limb edges. The cost is real: the widened band is background
-// pixels now carrying near depth, so a little of the crowd travels with the
-// finger. That trades a visible freeze for a subtle smear, which reads better.
-// A proper fix is inpainting the dis-occluded region, which needs layers.
-if thinDilate > 0 {
-  let thickness = greyBytes(blurred(ciFromGrey(heroUnion), Float(max(W, H)) / 40.0))
-  let grown = greyBytes(blurred(ciFromGrey(heroUnion), thinDilate / 1.5))
-  var widened = 0
-  for i in 0..<(W * H) {
-    guard heroUnion[i] < 128 else { continue }
-    let nearHeroEdge = grown[i] >= 13
-    let isThin = Float(thickness[i]) / 255.0 < thinCut
-    if nearHeroEdge && isThin { heroUnion[i] = 255; widened += 1 }
-  }
-  FileHandle.standardError.write(
-    String(format: "thin-dilate widened %.2f%% of frame\n",
-           Double(widened) / Double(W * H) * 100).data(using: .utf8)!)
-}
-
-let heroImage = ciFromGrey(heroUnion)
-let matte = greyBytes(blurred(heroImage, feather))
+let matte = greyBytes(blurred(maskImage, feather))
 // Stand-in for a distance transform: blur wide enough that only the interior
-// stays saturated. Only consulted when relief > 0.
-let mound = greyBytes(blurred(heroImage, Float(max(W, H)) / 40.0))
+// stays saturated.
+let mound = greyBytes(blurred(maskImage, Float(max(W, H)) / 40.0))
 
 // Secondary figures — opt-in, and read the caveat below before using it.
 //
@@ -309,7 +158,7 @@ let mound = greyBytes(blurred(heroImage, Float(max(W, H)) / 40.0))
 // stops — mid-torso here. For a figure the mask only half-finds, leaving this
 // off and letting them ride the background ramp reads cleaner.
 var personMask: [UInt8]? = nil
-if usePersons, let pObs = persons.results?.first {
+if let pObs = persons.results?.first {
   let pci = CIImage(cvPixelBuffer: pObs.pixelBuffer)
   let scaled = pci.transformed(by: CGAffineTransform(
     scaleX: CGFloat(W) / pci.extent.width, y: CGFloat(H) / pci.extent.height))
@@ -320,35 +169,16 @@ if usePersons, let pObs = persons.results?.first {
   var solid = [UInt8](repeating: 0, count: W * H)
   for i in 0..<(W * H) { solid[i] = Float(grown[i]) / 255.0 >= midLo ? 255 : 0 }
 
-  personMask = greyBytes(blurred(ciFromGrey(solid), radius * 0.5))
+  guard let provider = CGDataProvider(data: Data(solid) as CFData),
+        let solidCG = CGImage(width: W, height: H, bitsPerComponent: 8, bitsPerPixel: 8,
+                              bytesPerRow: W, space: grey,
+                              bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                              provider: provider, decode: nil, shouldInterpolate: false,
+                              intent: .defaultIntent) else { fail("could not build mask") }
+  personMask = greyBytes(blurred(CIImage(cgImage: solidCG), radius * 0.5))
 }
 
 // ------------------------------------------------------------- compose depth
-
-// A matte carries no depth *within* the subject, so a flat cutout makes every
-// part of a figure travel identically — an outstretched hand moves exactly like
-// the chest behind it and the limb reads as stiff. `tilt` spreads depth linearly
-// across the subject so a chosen direction sits nearer.
-//
-// This is an authored approximation, not measured depth: it says "this end of
-// him is closer", which for a single limb reaching toward the lens is enough to
-// sell the movement. It cannot know that a wrist bends. Off by default.
-var tiltAxis = (x: Float(0), y: Float(0))
-var tiltMin = Float.greatestFiniteMagnitude
-var tiltMax = -Float.greatestFiniteMagnitude
-
-if tilt != 0 {
-  let rad = tiltDeg * Float.pi / 180
-  tiltAxis = (x: cos(rad), y: sin(rad))
-  for y in 0..<H {
-    for x in 0..<W where heroUnion[y * W + x] > 127 {
-      let p = Float(x) * tiltAxis.x + Float(y) * tiltAxis.y
-      tiltMin = min(tiltMin, p)
-      tiltMax = max(tiltMax, p)
-    }
-  }
-}
-let tiltSpan = max(tiltMax - tiltMin, 1)
 
 func smoothstep(_ a: Float, _ b: Float, _ x: Float) -> Float {
   guard b > a else { return x < a ? 0 : 1 }
@@ -367,11 +197,7 @@ for y in 0..<H {
     let i = y * W + x
     let m = Float(matte[i]) / 255.0
     let interior = Float(mound[i]) / 255.0
-    var subject = near - relief * (1.0 - interior)
-    if tilt != 0 {
-      let p = Float(x) * tiltAxis.x + Float(y) * tiltAxis.y
-      subject += tilt * ((p - tiltMin) / tiltSpan - 0.5)
-    }
+    let subject = near - relief * (1.0 - interior)
 
     var d = bg
     if let pm = personMask {
@@ -406,17 +232,10 @@ func writePNG(_ bytes: [UInt8], to path: String) {
 
 writePNG(depth, to: output)
 if !matteOut.isEmpty { writePNG(matte, to: matteOut) }
-if !personOut.isEmpty, let pObs = persons.results?.first {
-  let pci = CIImage(cvPixelBuffer: pObs.pixelBuffer)
-  writePNG(greyBytes(pci.transformed(by: CGAffineTransform(
-    scaleX: CGFloat(W) / pci.extent.width, y: CGFloat(H) / pci.extent.height))), to: personOut)
-}
 
 let coverage = Double(subjectPixels) / Double(W * H) * 100
 let secondary = Double(secondaryPixels) / Double(W * H) * 100
 let centroid = subjectPixels > 0 ? Double(sumY) / Double(subjectPixels) / Double(H) : 0
 print(String(format: "%dx%d  subject %.1f%% of frame (centroid %.2f down), secondary figures %.1f%%",
              W, H, coverage, centroid, secondary))
-print(String(format: "near %.2f, tilt %.2f @ %.0f deg, relief %.2f, feather %.1f px",
-             near, tilt, tiltDeg, relief, feather))
 print("wrote \(output)" + (matteOut.isEmpty ? "" : " and \(matteOut)"))
