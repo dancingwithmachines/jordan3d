@@ -16,6 +16,7 @@ let depth = null;
 let bg = null;             // layered mode: pre-filled background plate
 let sprite = null;         // layered mode: subject cut-out, with alpha
 let subjDepth = null;      // layered mode: depth within the subject
+let bgDepth = null;        // layered mode: background depth, subject carved out
 let placeholder = false;   // depth is luminance-derived, not real
 let inspect = null;        // { cx, cy, z } magnifier, for checking edge artefacts
 
@@ -70,6 +71,11 @@ function setSprite(gl, source) {
 function setSubjDepth(gl, source) {
   if (subjDepth) gl.deleteTexture(subjDepth.tex);
   subjDepth = createTexture(gl, source);
+}
+
+function setBgDepth(gl, source) {
+  if (bgDepth) gl.deleteTexture(bgDepth.tex);
+  bgDepth = createTexture(gl, source);
 }
 
 function setPlaceholder(gl, source) {
@@ -174,6 +180,8 @@ async function main() {
     setBg(gl, bgImg);
     setSprite(gl, spriteImg);
     setSubjDepth(gl, sdImg);
+    // optional: without it the background falls back to the analytic ramp
+    try { setBgDepth(gl, await loadImage(paths.bgDepth)); } catch {}
   } catch {
     if (P.mode === 'layers') {
       P.mode = 'depth';
@@ -190,6 +198,7 @@ async function main() {
   gl.uniform1i(layered.uniforms.uBg, 0);
   gl.uniform1i(layered.uniforms.uSprite, 1);
   gl.uniform1i(layered.uniforms.uSubjDepth, 2);
+  gl.uniform1i(layered.uniforms.uBgDepth, 3);
   gl.uniform3f(layered.uniforms.uBackground, background[0], background[1], background[2]);
 
   let last = performance.now();
@@ -224,6 +233,9 @@ async function main() {
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, bg.tex);
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, sprite.tex);
       gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, subjDepth.tex);
+      gl.activeTexture(gl.TEXTURE3);
+      gl.bindTexture(gl.TEXTURE_2D, (bgDepth || subjDepth).tex);
+      gl.uniform1f(uniforms.uHasBgDepth, bgDepth ? 1 : 0);
       gl.uniform1f(uniforms.uRelief, P.subjectRelief);
       gl.uniform1f(uniforms.uBgTop, P.bgTop);
       gl.uniform1f(uniforms.uBgBottom, P.bgBottom);

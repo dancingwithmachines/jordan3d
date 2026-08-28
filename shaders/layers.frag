@@ -24,7 +24,8 @@ out vec4 fragColor;
 
 uniform sampler2D uBg;
 uniform sampler2D uSprite;
-uniform sampler2D uSubjDepth;   // smooth depth *within* the subject
+uniform sampler2D uSubjDepth;   // depth within the subject
+uniform sampler2D uBgDepth;     // depth of the background, subject carved out
 
 uniform vec2  uUvScale;
 uniform vec2  uUvOffset;
@@ -32,8 +33,9 @@ uniform vec2  uParallax;
 
 uniform float uDepthScale;
 uniform float uFocus;
-uniform float uBgTop;        // background depth at the top of the frame
-uniform float uBgBottom;     // ...and at the bottom
+uniform float uBgTop;        // fallback ramp, used when uHasBgDepth is 0
+uniform float uBgBottom;
+uniform float uHasBgDepth;   // 1 when a real background depth map is loaded
 uniform float uSpriteDepth;  // the flat fallback, when relief is 0
 uniform float uRelief;       // 0 = flat cutout, 1 = full subject depth
 uniform vec3  uBackground;
@@ -41,9 +43,14 @@ uniform vec3  uBackground;
 void main() {
   vec2 base = (vUv - 0.5) * uUvScale + 0.5 + uUvOffset;
 
-  // vUv counts up; the ramp was authored top-down, so flip for the lookup.
-  float bgDepth = mix(uBgTop, uBgBottom, 1.0 - base.y);
+  // Real background depth when we have it — that is what finally lets the rim
+  // and net lead the crowd instead of drifting with it. vUv counts up and the
+  // fallback ramp was authored top-down, hence the flip.
+  float ramp = mix(uBgTop, uBgBottom, 1.0 - base.y);
+  float bgDepth = mix(ramp, texture(uBgDepth, base).r, uHasBgDepth);
   vec2 bgUv = base + uParallax * uDepthScale * (bgDepth - uFocus);
+  bgDepth = mix(ramp, texture(uBgDepth, bgUv).r, uHasBgDepth);
+  bgUv = base + uParallax * uDepthScale * (bgDepth - uFocus);
 
   // Depth inside the sprite is smooth — the hard subject/background edge is
   // alpha's job here, not depth's — so this needs no search along the ray and

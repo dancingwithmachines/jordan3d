@@ -10,6 +10,7 @@ export const paths = {
   bg: 'assets/bg.jpg',
   sprite: 'assets/subject.png',
   spriteDepth: 'assets/subject_depth.png',
+  bgDepth: 'assets/bg_depth.png',
 
   // Used only if the two above are missing, so the page is never blank.
   // Regenerate with: python3 tools/make_test_scene.py
@@ -41,7 +42,7 @@ export const params = {
   // 0 = flat cutout, 1 = the baked field as-is. Above 1 amplifies it, which is
   // safe here — inside the sprite the field is smooth, so there is no cliff for
   // a bigger displacement to tear against. Verified clean to 2.4.
-  subjectRelief: 2.0,
+  subjectRelief: 1.0,
   spriteDepth: 0.86,  // the flat fallback used when subjectRelief is 0
   bgTop: 0.26,       // must match what tools/make_depth.sh was given
   bgBottom: 0.34,

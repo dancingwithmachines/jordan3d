@@ -27,6 +27,11 @@ func fail(_ msg: String) -> Never {
 // ------------------------------------------------------------------- options
 
 var input = "", bgOut = "", spriteOut = "", maskOut = "", depthOut = ""
+var depthIn = "", bgDepthOut = ""
+var subjThresh: Float = 0.45   // model depth below this, inside the mask, is
+                               // treated as a hole and filled from neighbours
+var depthSmooth: Float = 4     // px blur on the subject depth field
+var bgDepthSmooth: Float = 10  // px blur on the background depth field
 var base: Float = 0.86     // the subject's overall depth
 var bulge: Float = 0.12    // how much rounder the core reads than the edges
 var tilt: Float = 0.14     // linear spread across the subject
@@ -53,6 +58,11 @@ while let flag = args.first {
   case "--sprite":  spriteOut = value()
   case "--mask":    maskOut = value()
   case "--depth":   depthOut = value()
+  case "--depth-in":  depthIn = value()     // real depth from the monocular model
+  case "--bg-depth":  bgDepthOut = value()
+  case "--subj-thresh": subjThresh = Float(value()) ?? subjThresh
+  case "--depth-smooth":    depthSmooth = Float(value()) ?? depthSmooth
+  case "--bg-depth-smooth": bgDepthSmooth = Float(value()) ?? bgDepthSmooth
   case "--base":    base = Float(value()) ?? base
   case "--bulge":   bulge = Float(value()) ?? bulge
   case "--tilt":    tilt = Float(value()) ?? tilt
@@ -446,6 +456,90 @@ for i in 0..<(W * H) {
 }
 writeRGBA(spriteBytes, to: spriteOut)
 
+// ------------------------------------------- real depth, split across layers
+//
+// With a monocular model's depth map we no longer have to author anything. The
+// same map serves both layers, but each needs its own copy:
+//
+//   subject depth — the map as predicted, extended outward past the sprite's
+//                   alpha so bilinear filtering at the edge has real values.
+//   background depth — the subject's depth carved out and filled, because
+//                   behind him the background is at *background* depth, not his.
+//
+// Both use the fills already built for colour.
+if !depthIn.isEmpty {
+  guard let dSrc = CGImageSourceCreateWithURL(URL(fileURLWithPath: depthIn) as CFURL, nil),
+        let dCG = CGImageSourceCreateImageAtIndex(dSrc, 0, nil) else {
+    fail("could not read \(depthIn)")
+  }
+  let predicted = greyBytes(CIImage(cgImage: dCG).transformed(by: CGAffineTransform(
+    scaleX: CGFloat(W) / CGFloat(dCG.width), y: CGFloat(H) / CGFloat(dCG.height))))
+
+  // the fill helpers work on rgb, so carry depth in all three channels
+  /// `requireForeground` additionally rejects model depth that reads as
+  /// background *inside* the subject mask. The model loses thin, low-contrast
+  /// extremities just as Vision does — on this frame it puts the thumb tip at
+  /// 0.165, solid crowd depth — and a sprite pixel carrying background depth
+  /// parallaxes away from the hand it belongs to, which is the very artefact
+  /// this whole exercise is chasing. Treat those as holes and fill them from
+  /// neighbouring subject depth instead.
+  func fillDepth(keepWhere known: [UInt8], invert: Bool, requireForeground: Bool = false) -> [UInt8] {
+    var colour = [Float](repeating: 0, count: W * H * 3)
+    var weight = [Float](repeating: 0, count: W * H)
+    var rejected = 0
+    for i in 0..<(W * H) {
+      let v = Float(predicted[i]) / 255
+      colour[i*3] = v; colour[i*3+1] = v; colour[i*3+2] = v
+      let inside = known[i] > 127
+      var ok = (invert ? !inside : inside)
+      if ok && requireForeground && v < subjThresh { ok = false; rejected += 1 }
+      weight[i] = ok ? 1 : 0
+    }
+    if requireForeground {
+      FileHandle.standardError.write(
+        String(format: "subject depth: %.2f%% of frame rejected as background-inside-mask\n",
+               Double(rejected) / Double(W * H) * 100).data(using: .utf8)!)
+    }
+    var photoLike = [UInt8](repeating: 0, count: W * H * 4)
+    for i in 0..<(W * H) {
+      for k in 0..<3 { photoLike[i*4+k] = predicted[i] }
+      photoLike[i*4+3] = 255
+    }
+    mirrorFill(colour: &colour, weight: &weight, photo: photoLike, maxDist: extend)
+    let out = pyramidFill(colour: colour, weight: weight)
+    var bytes = [UInt8](repeating: 0, count: W * H)
+    for i in 0..<(W * H) { bytes[i] = UInt8(max(0, min(255, out[i*3] * 255 + 0.5))) }
+    return bytes
+  }
+
+  // A model's depth steps hard at a silhouette. Inside a sprite that detail is
+  // wasted — alpha already draws the edge — but it is actively harmful: the
+  // per-pixel offset then jumps between neighbouring pixels and tears the alpha
+  // edge into a zigzag. Blurring the field costs nothing visible and fixes it.
+  func smoothed(_ bytes: [UInt8], _ radius: Float) -> [UInt8] {
+    guard radius > 0 else { return bytes }
+    return greyBytes(blurred(ciFromGrey(bytes), radius))
+  }
+
+  if !depthOut.isEmpty {
+    // keep the subject's own depth, extend it outward
+    let sd = smoothed(fillDepth(keepWhere: subject, invert: false, requireForeground: true),
+                      depthSmooth)
+    var m = [UInt8](repeating: 0, count: W * H * 4)
+    for i in 0..<(W * H) { for k in 0..<3 { m[i*4+k] = sd[i] }; m[i*4+3] = 255 }
+    writeRGBA(m, to: depthOut)
+    FileHandle.standardError.write("wrote subject depth from the model\n".data(using: .utf8)!)
+  }
+  if !bgDepthOut.isEmpty {
+    // carve the subject out and fill, so the plate carries background depth
+    let bd = smoothed(fillDepth(keepWhere: hole, invert: true), bgDepthSmooth)
+    var m = [UInt8](repeating: 0, count: W * H * 4)
+    for i in 0..<(W * H) { for k in 0..<3 { m[i*4+k] = bd[i] }; m[i*4+3] = 255 }
+    writeRGBA(m, to: bgDepthOut)
+    FileHandle.standardError.write("wrote background depth from the model\n".data(using: .utf8)!)
+  }
+}
+
 // ------------------------------------------------- depth *within* the subject
 //
 // Layered compositing hands the subject-to-background cliff to alpha, so the
@@ -463,7 +557,7 @@ writeRGBA(spriteBytes, to: spriteOut)
 // Defined everywhere, not just under the mask: outside the silhouette thickness
 // falls to zero and the tilt still evaluates, so the field stays continuous and
 // bilinear filtering at the sprite edge has nothing to catch on.
-if !depthOut.isEmpty {
+if !depthOut.isEmpty && depthIn.isEmpty {
   let thickness = greyBytes(blurred(ciFromGrey(subject), Float(max(W, H)) / 26.0))
 
   var tMin = Float.greatestFiniteMagnitude, tMax = -Float.greatestFiniteMagnitude

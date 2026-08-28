@@ -4,5 +4,8 @@
 # compiled depth tool
 tools/.build/
 
+# local python venv for the depth model (~2.5GB, rebuild with pip)
+tools/.venv/
+
 # screenshots and generated mattes — regenerate with tools/make_depth.sh
 grabs/
