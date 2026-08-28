@@ -31,15 +31,20 @@ var depthIn = "", bgDepthOut = "", provOut = ""
 var subjThresh: Float = 0.45   // model depth below this, inside the mask, is
                                // treated as a hole and filled from neighbours
 var depthSmooth: Float = 4     // px blur on the subject depth field
+var subjClamp: Float = 0.05    // depth this far below the local level is a hole
+var subjClampRadius: Float = 40 // px defining "local" for that comparison
 var bgDepthSmooth: Float = 10  // px blur on the background depth field
 var fillSmooth = 2             // box-blur passes over filled pixels only
 var base: Float = 0.86     // the subject's overall depth
 var bulge: Float = 0.12    // how much rounder the core reads than the edges
 var tilt: Float = 0.14     // linear spread across the subject
 var tiltDeg: Float = 135   // direction that gets nearer; y counts downward
-var grow: Float = 4        // px to dilate the hole, so no subject edge is left behind
+var grow: Float = 4        // blur radius used to dilate the hole
+var holeThresh: Float = 0.25   // level taken as "inside the hole" after that blur
 var erode: Float = 1       // px to pull the sprite edge in, against crowd fringing
 var feather: Float = 1.2   // sprite alpha softening
+var patchSmooth: Float = 2.5   // spatial smoothing of a patch's colour gate
+var patchGrow = 22             // max px a patch may grow out from the mask
 var extend: Float = 90     // px of mirrored, texture-preserving fill before the
                            // pyramid takes over; this is the band that shows
 var heroFill: Float = 70   // px reach for recovering thin bits Vision drops
@@ -64,6 +69,8 @@ while let flag = args.first {
   case "--bg-depth":  bgDepthOut = value()
   case "--subj-thresh": subjThresh = Float(value()) ?? subjThresh
   case "--depth-smooth":    depthSmooth = Float(value()) ?? depthSmooth
+  case "--subj-clamp":      subjClamp = Float(value()) ?? subjClamp
+  case "--subj-clamp-radius": subjClampRadius = Float(value()) ?? subjClampRadius
   case "--bg-depth-smooth": bgDepthSmooth = Float(value()) ?? bgDepthSmooth
   case "--fill-smooth":     fillSmooth = Int(value()) ?? fillSmooth
   case "--base":    base = Float(value()) ?? base
@@ -71,9 +78,12 @@ while let flag = args.first {
   case "--tilt":    tilt = Float(value()) ?? tilt
   case "--tilt-deg": tiltDeg = Float(value()) ?? tiltDeg
   case "--grow":    grow = Float(value()) ?? grow
+  case "--hole-thresh": holeThresh = Float(value()) ?? holeThresh
   case "--erode":   erode = Float(value()) ?? erode
   case "--feather": feather = Float(value()) ?? feather
   case "--extend":  extend = Float(value()) ?? extend
+  case "--patch-smooth": patchSmooth = Float(value()) ?? patchSmooth
+  case "--patch-grow":   patchGrow = Int(value()) ?? patchGrow
   case "--hero-fill":   heroFill = Float(value()) ?? heroFill
   case "--hero-thresh": heroThresh = Float(value()) ?? heroThresh
   case "--patch":
@@ -218,6 +228,9 @@ if !patches.isEmpty {
   let photo = rgbaBytes(cgImage)
   for patch in patches {
     var inPatch = [Bool](repeating: false, count: W * H)
+    // Candidates start as a copy of the mask so the smoothing below sees the
+    // solid silhouette next door and grows coherently out of it.
+    var cand = subject
     let cx = patch.cx * Float(W), cy = patch.cy * Float(H)
     let rx = max(patch.rx * Float(W), 1), ry = max(patch.ry * Float(H), 1)
     for y in max(0, Int(cy - ry))...min(H - 1, Int(cy + ry)) {
@@ -228,9 +241,75 @@ if !patches.isEmpty {
         inPatch[i] = true
         if subject[i] > 127 { continue }
         let r = Int(photo[i*4]), g = Int(photo[i*4+1]), b = Int(photo[i*4+2])
-        let isSkin = r > 80 && r >= g && g >= b && (r - b) > 14
-        if !patch.skin || isSkin { subject[i] = 255; fromPatch[i] = 255 }
+        // Warmth alone, deliberately. Requiring r >= g >= b only ever admits
+        // orange-dominant skin, and skin in shadow picks up blue from the
+        // crowd around it, so blue overtakes green: 124,72,83 and 133,86,105
+        // are plainly his hand and were both rejected. Those pixels then sat in
+        // the background layer and drifted away from the hand as a brown blob
+        // that read as a stray finger. Measured here, hand pixels run r-b 24..113
+        // while the pale crowd runs 6 or negative, so warmth separates them on
+        // its own.
+        _ = (r, g, b)
       }
+    }
+
+    // Region growing, not area filling.
+    //
+    // Filling every gated pixel inside the ellipse makes the *ellipse* the
+    // boundary: measured, the mask's edge traced this arc to within a pixel for
+    // 11 of 14 rows, which is the hard geometric shape around the thumb. It
+    // also cuts skin off where the digit continues past the arc, and admits
+    // crowd where the arc reaches past the skin.
+    //
+    // Instead grow outward from the hand a ring at a time, taking a pixel only
+    // if it touches what we have already and is warm. The region then stops
+    // where the skin stops, so the boundary is anatomy. The ellipse survives
+    // only as a bound on where growing may happen, and because growth halts on
+    // its own, that bound is never what you see. Connectivity is what makes it
+    // safe: warm crowd beyond the pale gap next to his thumb is never reached.
+    let warm: (Int) -> Bool = { i in
+      let r = Int(photo[i*4]), g = Int(photo[i*4+1]), b = Int(photo[i*4+2])
+      return r > 80 && r >= g && (r - b) > 14
+    }
+    if patch.skin {
+      for _ in 0..<patchGrow {
+        var add: [Int] = []
+        for y in 1..<(H - 1) {
+          for x in 1..<(W - 1) {
+            let i = y * W + x
+            guard inPatch[i] && cand[i] < 128 && warm(i) else { continue }
+            var touches = false
+            for dy in -1...1 where !touches {
+              for dx in -1...1 {
+                if cand[(y + dy) * W + (x + dx)] > 127 { touches = true; break }
+              }
+            }
+            if touches { add.append(i) }
+          }
+        }
+        if add.isEmpty { break }
+        for i in add { cand[i] = 255 }
+      }
+    } else {
+      for y in 0..<H {
+        for x in 0..<W where inPatch[y * W + x] { cand[y * W + x] = 255 }
+      }
+    }
+
+    // A per-pixel colour test on grainy film admits and rejects neighbouring
+    // pixels almost at random, which leaves a dithered mask edge — visible as
+    // ragged, crawling artefacts along the fingers, worse than the problem the
+    // gate was widened to fix. Blurring the candidate map and re-thresholding
+    // turns that speckle into a coherent boundary: isolated hits fall below the
+    // threshold and disappear, solid regions survive with a smooth edge.
+    if patchSmooth > 0 {
+      let soft = greyBytes(blurred(ciFromGrey(cand), patchSmooth))
+      for i in 0..<(W * H) where inPatch[i] {
+        cand[i] = soft[i] >= 128 ? 255 : 0
+      }
+    }
+    for i in 0..<(W * H) where inPatch[i] && cand[i] > 127 && subject[i] < 128 {
+      subject[i] = 255; fromPatch[i] = 255
     }
 
     // Close interior holes only. A gated patch skips a lit highlight on the
@@ -468,7 +547,17 @@ func smoothFilled(_ colour: inout [Float], filledMask: [Bool], passes: Int) {
 
 let photo = rgbaBytes(cgImage)
 
-// The hole is the subject, dilated so no sliver of him is left in the plate.
+// The hole is the subject, dilated slightly so no sliver of him is left behind
+// in the plate.
+//
+// How far it dilates matters more than it looks. Thresholding a blurred mask at
+// a very low level pushes the boundary out a long way, which closes narrow
+// *enclosed* background gaps — the dark slots between his fingers. Those are
+// genuine background: the sprite does not draw them, so erasing them from the
+// plate too means they render as fill mush, the fingers lose their separation
+// and read as missing. Take a level near the middle instead, so the dilation is
+// a couple of px: enough to bury the matte's soft edge, not enough to swallow a
+// gap.
 let hole = greyBytes(blurred(ciFromGrey(subject), grow))
 var bgColour = [Float](repeating: 0, count: W * H * 3)
 var bgWeight = [Float](repeating: 0, count: W * H)
@@ -477,7 +566,7 @@ for i in 0..<(W * H) {
   bgColour[i*3+1] = Float(photo[i*4+1]) / 255
   bgColour[i*3+2] = Float(photo[i*4+2]) / 255
   // anything the dilated mask touches at all is treated as unknown
-  bgWeight[i] = Float(hole[i]) / 255 > 0.02 ? 0 : 1
+  bgWeight[i] = Float(hole[i]) / 255 > holeThresh ? 0 : 1
 }
 let unknownPct = Double(bgWeight.reduce(0) { $0 + ($1 < 1 ? 1 : 0) }) / Double(W * H) * 100
 FileHandle.standardError.write(String(format: "filling %.1f%% of the plate\n", unknownPct).data(using: .utf8)!)
@@ -599,6 +688,31 @@ if !depthIn.isEmpty {
   // wasted — alpha already draws the edge — but it is actively harmful: the
   // per-pixel offset then jumps between neighbouring pixels and tears the alpha
   // edge into a zigzag. Blurring the field costs nothing visible and fixes it.
+  /// Removes valleys in the subject's depth field.
+  ///
+  /// A fixed threshold only catches the floor of a dip. On this frame the
+  /// model's depth across the thumb runs 158, 153, 128, 91, 91, 125 while the
+  /// rest of the hand sits at ~155: the deepest pixels get rejected and filled,
+  /// but the shoulders at 125-147 read as plausible, survive, and smoothing then
+  /// blends the hole back in. Those pixels are inside the sprite yet displace
+  /// like crowd, which tears the hand.
+  ///
+  /// Comparing each pixel against a wide local average instead catches the whole
+  /// valley, whatever its depth, while leaving genuine large-scale gradients
+  /// alone — the local average follows those.
+  func clampValleys(_ d: [UInt8], mask: [UInt8], tol: Float, radius: Float) -> [UInt8] {
+    guard tol > 0 else { return d }
+    var cur = d
+    for _ in 0..<2 {                                  // twice: the valley drags the average down
+      let wide = greyBytes(blurred(ciFromGrey(cur), radius))
+      for i in 0..<(W * H) where mask[i] > 127 {
+        let dv = Float(cur[i]) / 255, wv = Float(wide[i]) / 255
+        if dv < wv - tol { cur[i] = UInt8(max(0, min(255, wv * 255 + 0.5))) }
+      }
+    }
+    return cur
+  }
+
   func smoothed(_ bytes: [UInt8], _ radius: Float) -> [UInt8] {
     guard radius > 0 else { return bytes }
     return greyBytes(blurred(ciFromGrey(bytes), radius))
@@ -606,8 +720,9 @@ if !depthIn.isEmpty {
 
   if !depthOut.isEmpty {
     // keep the subject's own depth, extend it outward
-    let sd = smoothed(fillDepth(keepWhere: subject, invert: false, requireForeground: true),
-                      depthSmooth)
+    let filled = fillDepth(keepWhere: subject, invert: false, requireForeground: true)
+    let levelled = clampValleys(filled, mask: subject, tol: subjClamp, radius: subjClampRadius)
+    let sd = smoothed(levelled, depthSmooth)
     var m = [UInt8](repeating: 0, count: W * H * 4)
     for i in 0..<(W * H) { for k in 0..<3 { m[i*4+k] = sd[i] }; m[i*4+3] = 255 }
     writeRGBA(m, to: depthOut)
